@@ -1,0 +1,24 @@
+<RCC>
+  <qresource prefix="/">
+    <file alias="branding/astra_logo.png">astra_logo.png</file>
+    <file alias="icons/astra.png">astra_icon.png</file>
+
+    <!-- Platform badges (top-right overlay on tiles) -->
+    <file alias="platform/ps2.png">PS2.png</file>
+    <file alias="platform/ps3.png">PS3.png</file>
+    <file alias="platform/ps4.png">PS4.png</file>
+    <file alias="platform/psp.png">PSP.png</file>
+    <file alias="platform/psvita.png">PSVita.png</file>
+    <file alias="platform/xbox.png">Xbox.png</file>
+    <file alias="platform/xbox360.png">Xbox360.png</file>
+    <file alias="platform/gamecube.png">GC.png</file>
+    <file alias="platform/wii.png">Wii.png</file>
+    <file alias="platform/wiiu.png">WiiU.png</file>
+
+    <file alias="boxart/UNKNOWN.png">boxart/UNKNOWN.png</file>
+    <file alias="boxart/NCAAFB14.png">boxart/NCAAFB14.png</file>
+    <file alias="boxart/NCAAFB13.png">boxart/NCAAFB13.png</file>
+    <file alias="boxart/MADDEN12.png">boxart/MADDEN12.png</file>
+      <file alias="data/ea-sports.csv">ea-sports.csv</file>
+  </qresource>
+</RCC>

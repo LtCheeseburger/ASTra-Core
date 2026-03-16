@@ -1,0 +1,70 @@
+# Build output
+/build/
+/build-*/
+/out/
+/out-*/
+/cmake-build-*/
+/out-win/
+
+# CMake / Ninja generated files
+CMakeCache.txt
+CMakeFiles/
+Testing/
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+.ninja_deps
+.ninja_log
+build.ninja
+
+# Qt generated files
+moc_*.cpp
+moc_*.h
+qrc_*.cpp
+ui_*.h
+*.qrc.depends
+.qmake.stash
+
+# IDE / editor files
+.vscode/
+.vs/
+.idea/
+*.user
+*.suo
+*.vcxproj.user
+*.VC.db
+*.opendb
+
+# OS junk
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Logs / debug artifacts
+*.log
+*.tmp
+*.bak
+*.orig
+xpr2_debug.txt
+
+# Binaries / objects
+*.o
+*.obj
+*.a
+*.lib
+*.dll
+*.so
+*.dylib
+*.exe
+*.pdb
+*.ilk
+*.app
+*.dSYM/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Misc
+/.claude/
+.code-workspace

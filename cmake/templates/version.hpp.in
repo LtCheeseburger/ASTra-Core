@@ -1,0 +1,7 @@
+#pragma once
+namespace gf::core {
+inline constexpr int kVersionMajor = @GF_VERSION_MAJOR@;
+inline constexpr int kVersionMinor = @GF_VERSION_MINOR@;
+inline constexpr int kVersionPatch = @GF_VERSION_PATCH@;
+inline constexpr const char* kVersionString = "@GF_VERSION_STRING@";
+} // namespace gf::core

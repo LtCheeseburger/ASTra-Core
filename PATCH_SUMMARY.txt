@@ -1,0 +1,30 @@
+ASTra core-scope refactor patch summary
+=====================================
+
+What changed
+------------
+- Removed the user-facing File > Open APT action.
+- Removed APT, RSF, and DAT tabs from the main tab widget so the visible editor is focused on Hex, Text, and Texture views.
+- Simplified selected-entry preview routing to only drive:
+  - Hex/raw inspection
+  - Text/config/XML viewing/editing
+  - Texture preview/export/import paths
+- Removed the APT-specific context-menu entry (Load APT).
+- Updated the About / Beta Testing text so the app now describes the reduced core archive-editor scope instead of RSF/APT workflows.
+
+What remains intentionally intact
+---------------------------------
+- Game library / game registration flows
+- AST browsing and entry tree population
+- Search/filtering
+- Entry extraction / rebuild / replace flows
+- Texture preview and DDS/P3R/XPR2 workflows
+- Text/config/XML viewing and editing
+- Hex/raw inspection
+- Save / revert / backup-aware container workflows
+
+Notes
+-----
+- This patch focuses on removing the user-facing RSF/APT/DAT feature surface and simplifying preview routing around the core archive/text/texture workflows.
+- Existing backend/source files for RSF/APT support remain in the tree for now, but the main UI no longer exposes those specialized views.
+- Full CMake/build validation could not be completed in the container because configure attempts to FetchContent spdlog from GitHub and outbound network access is unavailable here.
