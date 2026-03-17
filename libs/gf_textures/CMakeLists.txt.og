@@ -7,7 +7,6 @@ add_library(gf_textures
   src/tga_reader.cpp
   src/dxt_compress.cpp
   src/dds_build.cpp
-  src/texture_replace.cpp
 )
 
 option(USE_XGADDRESS_UNTILE "Enable Xbox 360 XGAddress untile path for XPR2" OFF)

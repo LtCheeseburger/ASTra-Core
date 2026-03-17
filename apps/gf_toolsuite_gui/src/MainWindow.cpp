@@ -1,5 +1,9 @@
 #include "MainWindow.hpp"
 #include "CreateRsfAstDialog.hpp"
+#include "update/UpdateChecker.hpp"
+#include "update/UpdateDialog.hpp"
+#include "update/UpdaterLauncher.hpp"
+#include "update/UpdaterConfig.hpp"
 
 #include <gf/apt/apt_xml.hpp>
 #include <gf/apt/apt_reader.hpp>
@@ -174,6 +178,7 @@ static constexpr int kAptRolePlacementIndex = Qt::UserRole + 14;
 #include <gf/textures/dds_validate.hpp>
 #include <gf/textures/ea_dds_rebuild.hpp>
 #include <gf/textures/xpr2_rebuild.hpp>
+#include <gf/textures/texture_replace.hpp>
 #include "rsf_editor/RsfPreviewWidget.hpp"
 
 
@@ -874,7 +879,11 @@ static std::vector<std::uint8_t> p3rToDds(std::span<const std::uint8_t> in) {
 static std::vector<std::uint8_t> ddsToP3r(std::span<const std::uint8_t> in, std::uint8_t p3rVerByte = 0x02) {
   std::vector<std::uint8_t> out(in.begin(), in.end());
   if (out.size() >= 4 && out[0] == 'D' && out[1] == 'D' && out[2] == 'S' && out[3] == ' ') {
-    out[0] = 'P';
+    // EASE's DDStoP3R hardcodes data[0]=112 (0x70, lowercase 'p').
+    // The PS3 EA game loader only accepts this lowercase variant.
+    // Uppercase 'P' (0x50) causes the texture manager to reject the header,
+    // leaving 0x7FFFFFFF as the RSX texture offset -> fatal RSX crash.
+    out[0] = 0x70; // 'p' lowercase
     out[1] = '3';
     out[2] = 'R';
     out[3] = p3rVerByte;
@@ -2117,6 +2126,70 @@ void MainWindow::onShowCoreHelp() {
   QMessageBox::information(this, "About ASTra Core", text);
 }
 
+void MainWindow::onCheckForUpdates() {
+  // Disable the menu action while a check is already in progress to prevent
+  // spawning multiple simultaneous requests.
+  if (m_actCheckForUpdates)
+    m_actCheckForUpdates->setEnabled(false);
+
+  auto* checker = new gf::gui::update::UpdateChecker(
+      QStringLiteral(ASTRA_GITHUB_OWNER),
+      QStringLiteral(ASTRA_GITHUB_REPO),
+      this);
+
+  connect(checker, &gf::gui::update::UpdateChecker::updateAvailable,
+          this, [this, checker](const gf::gui::update::ReleaseInfo& info) {
+      checker->deleteLater();
+      if (m_actCheckForUpdates) m_actCheckForUpdates->setEnabled(true);
+
+      auto* dlg = new gf::gui::update::UpdateDialog(info, this);
+      dlg->setAttribute(Qt::WA_DeleteOnClose);
+
+      connect(dlg, &gf::gui::update::UpdateDialog::updateRequested,
+              this, [this](const gf::gui::update::ReleaseInfo& releaseInfo) {
+          auto* launcher = new gf::gui::update::UpdaterLauncher(this, this);
+
+          connect(launcher, &gf::gui::update::UpdaterLauncher::updateReadyToInstall,
+                  this, [this]() {
+              gf::core::Log::get()->info("[Updater] Update launched – closing ASTra");
+              QApplication::quit();
+          });
+
+          connect(launcher, &gf::gui::update::UpdaterLauncher::downloadFailed,
+                  this, [this, launcher](const QString& reason) {
+              QMessageBox::critical(this, tr("Update Failed"),
+                  tr("The update could not be downloaded or applied:\n\n%1").arg(reason));
+              launcher->deleteLater();
+          });
+
+          launcher->startUpdate(releaseInfo);
+      });
+
+      dlg->exec();
+  });
+
+  connect(checker, &gf::gui::update::UpdateChecker::upToDate,
+          this, [this, checker]() {
+      checker->deleteLater();
+      if (m_actCheckForUpdates) m_actCheckForUpdates->setEnabled(true);
+
+      auto* dlg = new gf::gui::update::UpToDateDialog(this);
+      dlg->setAttribute(Qt::WA_DeleteOnClose);
+      dlg->exec();
+  });
+
+  connect(checker, &gf::gui::update::UpdateChecker::checkFailed,
+          this, [this, checker](const QString& errorMessage) {
+      checker->deleteLater();
+      if (m_actCheckForUpdates) m_actCheckForUpdates->setEnabled(true);
+
+      QMessageBox::warning(this, tr("Update Check Failed"),
+          tr("Could not check for updates:\n\n%1").arg(errorMessage));
+  });
+
+  checker->checkForUpdates();
+}
+
 void MainWindow::buildUi() {
   // ---- Menu bar (v0.6.1 foundation) ----
   auto* fileMenu = menuBar()->addMenu("File");
@@ -2160,6 +2233,11 @@ void MainWindow::buildUi() {
   auto* helpMenu = menuBar()->addMenu("Help");
   m_actCoreHelp = helpMenu->addAction("ASTra Core Help");
   connect(m_actCoreHelp, &QAction::triggered, this, &MainWindow::onShowCoreHelp);
+
+  helpMenu->addSeparator();
+  m_actCheckForUpdates = helpMenu->addAction("Check for Updates…");
+  connect(m_actCheckForUpdates, &QAction::triggered,
+          this, &MainWindow::onCheckForUpdates);
 
   // Editing is always enabled in ASTra editor mode.
   m_actEnableEditing = nullptr;
@@ -5036,8 +5114,11 @@ void MainWindow::onTreeContextMenu(const QPoint& pos) {
   };
 
   auto isTextureLikeType = [&](const QString& t) -> bool {
+    // ZLIB entries in PS3 ASTs are typically zlib-compressed P3R textures.
+    // Including ZLIB here gives them the "Replace Texture…" menu item so the
+    // TGA pipeline can inflate → detect P3R → rebuild → re-compress correctly.
     return (t == "DDS" || t == "P3R" || t == "P3R2" || t == "P3R3" || t == "P3R4" ||
-            t == "XPR2" || t == "XPR" || t == "TGA" || t == "PNG");
+            t == "XPR2" || t == "XPR" || t == "TGA" || t == "PNG" || t == "ZLIB");
   };
 
   QList<QTreeWidgetItem*> selectedItems = m_tree->selectedItems();
@@ -5240,6 +5321,12 @@ void MainWindow::onTreeContextMenu(const QPoint& pos) {
 
     QString filter = "All Files (*)";
     if (typeUpper == "AST") filter = "AST files (*.ast);;All Files (*)";
+    else if (validateTextureReplacement &&
+             (typeUpper.startsWith("P3R") || typeUpper == "DDS" ||
+              typeUpper == "XPR2" || typeUpper == "XPR" || typeUpper == "ZLIB"))
+      // TGA-first replacement dialog: TGA is the recommended format, DDS is advanced.
+      // ZLIB entries on PS3 are typically zlib-compressed P3R — same pipeline applies.
+      filter = "TGA — recommended (*.tga);;DDS — advanced (*.dds);;All Files (*)";
     else if (typeUpper.startsWith("P3R")) filter = "DDS/P3R files (*.dds *.p3r);;All Files (*)";
     else if (typeUpper == "DDS") filter = "DDS files (*.dds);;All Files (*)";
     else if (typeUpper == "XPR2" || typeUpper == "XPR") filter = "DDS files (*.dds);;All Files (*)";
@@ -5328,239 +5415,147 @@ void MainWindow::onTreeContextMenu(const QPoint& pos) {
     // 'ed' is the working editor that owns entryIndex.
     auto& ed = isNestedEntry ? innerEdOpt : outerEdOpt;
 
+    // ── TGA-first texture replacement pipeline ───────────────────────────────
+    // Determine import format from the file extension.
+    // TGA  → full pipeline: decode pixels → generate mips → compress BC → rebuild container.
+    // DDS  → advanced override: validate contract strictly, then rebuild container.
+    // Non-texture replace (validateTextureReplacement==false) → passthrough as before.
     QString validationDetails;
-    if (validateTextureReplacement && (typeUpper == "DDS" || typeUpper.startsWith("P3R"))) {
-      auto oldStored = ed->getEntryStoredBytes(entryIndex);
-      std::optional<gf::textures::DdsInfo> oldInfo;
-      if (oldStored && !oldStored->empty()) {
-        oldInfo = tryParseTextureDdsInfo(std::span<const std::uint8_t>(oldStored->data(), oldStored->size()), astFlags);
-      }
 
-      if (typeUpper.startsWith("P3R")) {
-        if (newBytes.size() < 4 || std::memcmp(newBytes.constData(), "DDS ", 4) != 0) {
-          showErrorDialog("Replace Texture Failed",
-                          "P3R replacement requires DDS input.",
-                          "Select a real DDS file; ASTra will validate it first and then convert it to P3R.",
-                          false);
-          return;
-        }
-      }
+    if (validateTextureReplacement) {
+      const QString importExt = QFileInfo(inPath).suffix().toLower();
+      const bool importIsTga = (importExt == "tga");
+      const bool importIsDds = (importExt == "dds");
 
-      const auto directValidation = gf::textures::inspect_dds(
-          std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(newBytes.constData()),
-                                        static_cast<std::size_t>(newBytes.size())));
-      if (directValidation.status == gf::textures::DdsValidationStatus::Invalid) {
+      if (!importIsTga && !importIsDds) {
         showErrorDialog("Replace Texture Failed",
-                        "The selected DDS is invalid.",
-                        ddsValidationDetailsText(directValidation),
+                        "Unsupported import format.",
+                        QString("Only TGA (recommended) and DDS (advanced) are accepted for texture replacement.\n"
+                                "Selected file: %1").arg(QFileInfo(inPath).fileName()),
                         false);
         return;
       }
 
-      auto newInfo = tryParseTextureDdsInfo(
-          std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(newBytes.constData()),
-                                        static_cast<std::size_t>(newBytes.size())),
-          astFlags);
-      const QString contractIssues = validateImportedDdsForEntry(typeUpper, directValidation, oldInfo, newInfo);
-      if (!contractIssues.isEmpty()) {
-        showErrorDialog("Replace Texture Failed",
-                        "DDS replacement does not match the original texture slot contract.",
-                        QString("Current texture: %1\nReplacement: %2\n\n%3\n\nDDS details:\n%4")
-                            .arg(oldInfo.has_value() ? ddsInfoSummary(*oldInfo) : QString("Unknown"))
-                            .arg(newInfo.has_value() ? ddsInfoSummary(*newInfo) : QString("Unknown"))
-                            .arg(contractIssues)
-                            .arg(ddsValidationDetailsText(directValidation)),
-                        false);
-        return;
-      }
-
-      validationDetails = QString("Current texture: %1\nReplacement: %2")
-                              .arg(oldInfo.has_value() ? ddsInfoSummary(*oldInfo) : QString("Unknown"))
-                              .arg(newInfo.has_value() ? ddsInfoSummary(*newInfo) : QString("Unknown"));
-    }
-
-    if (validateTextureReplacement && (typeUpper == "XPR2" || typeUpper == "XPR")) {
-      if (newBytes.size() < 4 || std::memcmp(newBytes.constData(), "DDS ", 4) != 0) {
-        showErrorDialog("Replace Texture Failed", "XPR2 replacement must be a DDS file.", "", false);
-        return;
-      }
-      if (static_cast<std::size_t>(newBytes.size()) < 128 + 8) {
-        showErrorDialog("Replace Texture Failed", "Replacement DDS has no texture data.", "", false);
-        return;
-      }
-      const auto newDdsValidation = gf::textures::inspect_dds(
-          std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(newBytes.constData()),
-                                        static_cast<std::size_t>(newBytes.size())));
-      if (newDdsValidation.status != gf::textures::DdsValidationStatus::Valid || newDdsValidation.dx10HeaderPresent) {
-        showErrorDialog("Replace Texture Failed",
-                        "Replacement DDS is not accepted for XPR2 import.",
-                        ddsValidationDetailsText(newDdsValidation), false);
-        return;
-      }
-      auto newDdsInfo = gf::textures::parse_dds_info(
-          std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(newBytes.constData()),
-                                        static_cast<std::size_t>(newBytes.size())));
-      if (!newDdsInfo) {
-        showErrorDialog("Replace Texture Failed", "Cannot parse the replacement DDS header.", ddsValidationDetailsText(newDdsValidation), false);
-        return;
-      }
-      if (newDdsInfo->width == 0 || newDdsInfo->height == 0) {
-        showErrorDialog("Replace Texture Failed", "Replacement DDS has invalid (zero) dimensions.", "", false);
-        return;
-      }
+      // Resolve the original container payload (needed by the pipeline and XPR2 patch).
       auto resolvedBase = resolveTexturePayloadForEditor(item, typeUpper, *ed, entryIndex);
       { auto lg = gf::core::Log::get(); if (lg) lg->info(
-            "XPR2Replace validate: name='{}' type={} entry={} source={} raw={} resolved={} sig=[{}]",
-            item->text(0).toStdString(), typeUpper.toStdString(), static_cast<unsigned long long>(entryIndex),
-            resolvedBase.source.toStdString(), static_cast<unsigned long long>(resolvedBase.rawSize),
-            static_cast<unsigned long long>(resolvedBase.bytes.size()),
-            hexSignaturePrefix(std::span<const std::uint8_t>(resolvedBase.bytes.data(), resolvedBase.bytes.size())).toStdString()); }
-      if (!resolvedBase.bytes.empty()) {
-        auto xprInfo = gf::textures::parse_xpr2_info(
-            std::span<const std::uint8_t>(resolvedBase.bytes.data(), resolvedBase.bytes.size()));
-        if (xprInfo) {
-          { auto lg = gf::core::Log::get(); if (lg) lg->info(
-                "XPR2Replace contract: name='{}' xpr={}x{} fmt=0x{:02X} mips={} dds={}x{} fmt={} mips={}",
-                item->text(0).toStdString(),
-                static_cast<unsigned>(xprInfo->width), static_cast<unsigned>(xprInfo->height), static_cast<unsigned>(xprInfo->fmt_code),
-                static_cast<unsigned>(xprInfo->mip_count),
-                static_cast<unsigned>(newDdsInfo->width), static_cast<unsigned>(newDdsInfo->height),
-                ddsFormatToString(newDdsInfo->format).toStdString(), static_cast<unsigned>(newDdsInfo->mipCount)); }
-          QStringList mismatchLines;
-          if (xprInfo->width != newDdsInfo->width)
-            mismatchLines << QString("Width mismatch: XPR2 %1 vs DDS %2").arg(xprInfo->width).arg(newDdsInfo->width);
-          if (xprInfo->height != newDdsInfo->height)
-            mismatchLines << QString("Height mismatch: XPR2 %1 vs DDS %2").arg(xprInfo->height).arg(newDdsInfo->height);
-          if (xprInfo->mip_count != newDdsInfo->mipCount)
-            mismatchLines << QString("Mip count mismatch: XPR2 %1 vs DDS %2").arg(xprInfo->mip_count).arg(newDdsInfo->mipCount);
-          const bool fmtMatch =
-              (xprInfo->fmt_code == 0x52 && newDdsInfo->format == gf::textures::DdsFormat::DXT1) ||
-              (xprInfo->fmt_code == 0x53 && newDdsInfo->format == gf::textures::DdsFormat::DXT3) ||
-              (xprInfo->fmt_code == 0x54 && newDdsInfo->format == gf::textures::DdsFormat::DXT5) ||
-              (xprInfo->fmt_code == 0x71 && newDdsInfo->format == gf::textures::DdsFormat::ATI2) ||
-              (xprInfo->fmt_code == 0x7C && newDdsInfo->format == gf::textures::DdsFormat::DXT1);
-          if (!fmtMatch)
-            mismatchLines << QString("Format mismatch: XPR2 fmt=0x%1 vs DDS %2")
-                              .arg(xprInfo->fmt_code, 2, 16, QChar('0'))
-                              .arg(ddsFormatToString(newDdsInfo->format));
-          if (!mismatchLines.isEmpty()) {
-            QString detailText = QString("Original XPR2: %1x%2 | fmt=0x%3 | mips=%4\nIncoming DDS: %5x%6 | %7 | mips=%8\n\n%9")
-                                     .arg(xprInfo->width)
-                                     .arg(xprInfo->height)
-                                     .arg(xprInfo->fmt_code, 2, 16, QChar('0'))
-                                     .arg(xprInfo->mip_count)
-                                     .arg(newDdsInfo->width)
-                                     .arg(newDdsInfo->height)
-                                     .arg(ddsFormatToString(newDdsInfo->format))
-                                     .arg(newDdsInfo->mipCount)
-                                     .arg(mismatchLines.join("\n"));
-            showErrorDialog("Replace Texture Failed",
-                            "DDS replacement does not match the original XPR2 texture contract.",
-                            detailText, false);
-            return;
-          }
-          validationDetails = QString("XPR2 texture replacement (DDS → XPR2)\nOriginal: %1x%2 | fmt=0x%3 | mips=%4\nReplacement: %5x%6 | %7 | mips=%8")
-                                  .arg(xprInfo->width)
-                                  .arg(xprInfo->height)
-                                  .arg(xprInfo->fmt_code, 2, 16, QChar('0'))
-                                  .arg(xprInfo->mip_count)
-                                  .arg(newDdsInfo->width)
-                                  .arg(newDdsInfo->height)
-                                  .arg(ddsFormatToString(newDdsInfo->format))
-                                  .arg(newDdsInfo->mipCount);
-        } else {
-          validationDetails = QString("XPR2 texture replacement (DDS → XPR2)");
-        }
-      } else {
-        validationDetails = QString("XPR2 texture replacement (DDS → XPR2)");
-      }
-    }
-
-    QString prompt = QString("This will MODIFY the AST container in memory until you Save.\n\nContainer:\n%1")
-                         .arg(QDir::toNativeSeparators(containerPath));
-    if (!validationDetails.isEmpty()) {
-      prompt += QString("\n\n%1").arg(validationDetails);
-    }
-    prompt += "\n\nContinue?";
-
-    const auto ans = QMessageBox::question(this,
-                                           "ASTra Core",
-                                           prompt,
-                                           QMessageBox::Yes | QMessageBox::No,
-                                           QMessageBox::No);
-    if (ans != QMessageBox::Yes) return;
-
-    QByteArray previewBytes = newBytes;
-
-    if (typeUpper.startsWith("P3R") && newBytes.size() >= 4 && std::memcmp(newBytes.constData(), "DDS ", 4) == 0) {
-      std::uint8_t verByte = 0x02;
-      const auto oldOpt = ed->getEntryStoredBytes(entryIndex);
-      if (oldOpt && oldOpt->size() >= 4 && (*oldOpt)[0] == 'P' && (*oldOpt)[1] == '3' && (*oldOpt)[2] == 'R') {
-        verByte = (*oldOpt)[3];
-      }
-      const auto conv = ddsToP3r(std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(newBytes.constData()),
-                                                               static_cast<std::size_t>(newBytes.size())),
-                                 verByte);
-      newBytes = QByteArray(reinterpret_cast<const char*>(conv.data()), int(conv.size()));
-    } else if ((typeUpper == "XPR2" || typeUpper == "XPR") &&
-               newBytes.size() >= 4 && std::memcmp(newBytes.constData(), "DDS ", 4) == 0) {
-      auto resolvedBase = resolveTexturePayloadForEditor(item, typeUpper, *ed, entryIndex);
-      { auto lg = gf::core::Log::get(); if (lg) lg->info(
-            "XPR2Replace patch: name='{}' type={} entry={} nested={} source={} raw={} resolved={} usedPreview={} usedPending={} usedInflate={} sig=[{}]",
-            item->text(0).toStdString(), typeUpper.toStdString(), static_cast<unsigned long long>(entryIndex),
-            isNestedEntry ? 1 : 0, resolvedBase.source.toStdString(),
+            "TexReplace pipeline start: name='{}' type={} importFmt={} src={} raw={} resolved={} sig=[{}]",
+            item->text(0).toStdString(), typeUpper.toStdString(),
+            importIsTga ? "TGA" : "DDS",
+            resolvedBase.source.toStdString(),
             static_cast<unsigned long long>(resolvedBase.rawSize),
             static_cast<unsigned long long>(resolvedBase.bytes.size()),
-            resolvedBase.usedPreview ? 1 : 0, resolvedBase.usedPending ? 1 : 0,
-            resolvedBase.usedInflate ? 1 : 0,
             hexSignaturePrefix(std::span<const std::uint8_t>(resolvedBase.bytes.data(), resolvedBase.bytes.size())).toStdString()); }
 
-      if (resolvedBase.bytes.empty()) {
-        showErrorDialog("XPR2 Conversion Failed",
-                        "Could not resolve the original XPR2 payload.",
-                        QString("Source: %1\nResolved size: 0 bytes")
-                            .arg(resolvedBase.source.isEmpty() ? QString("<none>") : resolvedBase.source),
-                        false);
-        return;
+      if (importIsDds) {
+        // Show an advisory warning so users understand DDS has stricter requirements.
+        const auto warnAns = QMessageBox::warning(
+            this, "DDS Import — Advanced Mode",
+            "DDS import requires the file to exactly match the original texture's\n"
+            "format, dimensions, and mip count.\n\n"
+            "TGA is the recommended format for reliable replacement.\n\n"
+            "Continue with DDS?",
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+        if (warnAns != QMessageBox::Yes) return;
       }
-      if (resolvedBase.bytes.size() < 4 || std::memcmp(resolvedBase.bytes.data(), "XPR2", 4) != 0) {
-        showErrorDialog("XPR2 Conversion Failed",
-                        "Could not convert DDS back to XPR2.",
-                        QString("Resolved base payload is not a raw XPR2 buffer.\n"
-                                "Source: %1\nRaw size: %2 bytes\nResolved size: %3 bytes\nSignature: %4")
-                            .arg(resolvedBase.source.isEmpty() ? QString("<none>") : resolvedBase.source)
-                            .arg(qulonglong(resolvedBase.rawSize))
-                            .arg(qulonglong(resolvedBase.bytes.size()))
-                            .arg(hexSignaturePrefix(std::span<const std::uint8_t>(resolvedBase.bytes.data(), resolvedBase.bytes.size()))),
-                        false);
+
+      // Determine the original payload span.
+      // For XPR2 we must use the raw XPR2 buffer (not the exported DDS).
+      // For ZLIB entries the resolvedBase is already inflated by
+      // resolveTexturePayloadForEditor, so the happy path is correct.
+      // The fallback (resolvedBase.bytes.empty()) must inflate manually
+      // because getEntryStoredBytes returns compressed bytes for ZLIB entries.
+      std::vector<std::uint8_t> fallbackInflated;
+      std::span<const std::uint8_t> origSpan;
+      if (resolvedBase.bytes.empty()) {
+        auto storedOpt = ed->getEntryStoredBytes(entryIndex);
+        if (!storedOpt || storedOpt->empty()) {
+          showErrorDialog("Replace Texture Failed",
+                          "Cannot read the original texture entry.",
+                          "Entry bytes are unavailable.", false);
+          return;
+        }
+        // If this is a ZLIB entry, inflate before passing to the pipeline.
+        if (typeUpper == "ZLIB" || looks_like_zlib_cmf_flg((*storedOpt)[0], storedOpt->size() >= 2 ? (*storedOpt)[1] : 0)) {
+          try {
+            fallbackInflated = zlib_inflate_unknown_size(
+                std::span<const std::uint8_t>(storedOpt->data(), storedOpt->size()));
+          } catch (...) {}
+        }
+        if (!fallbackInflated.empty()) {
+          origSpan = std::span<const std::uint8_t>(fallbackInflated.data(), fallbackInflated.size());
+        } else {
+          origSpan = std::span<const std::uint8_t>(storedOpt->data(), storedOpt->size());
+        }
+      } else {
+        origSpan = std::span<const std::uint8_t>(resolvedBase.bytes.data(), resolvedBase.bytes.size());
+      }
+
+      const auto importSpan = std::span<const std::uint8_t>(
+          reinterpret_cast<const std::uint8_t*>(newBytes.constData()),
+          static_cast<std::size_t>(newBytes.size()));
+      const auto importFmt = importIsTga
+          ? gf::textures::TexImportFormat::TGA
+          : gf::textures::TexImportFormat::DDS_Advanced;
+
+      // Quick pre-flight validation (cheap — no BC compression).
+      const std::string preflightErr = gf::textures::validate_texture_import(
+          origSpan, importSpan, importFmt, astFlags);
+      if (!preflightErr.empty()) {
+        showErrorDialog("Replace Texture Failed",
+                        "Import file is not compatible with the original texture.",
+                        QString::fromStdString(preflightErr), false);
         return;
       }
 
-      std::string convErr;
-      auto patched = gf::textures::dds_to_xpr2_patch(
-          std::span<const std::uint8_t>(resolvedBase.bytes.data(), resolvedBase.bytes.size()),
-          std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(newBytes.constData()),
-                                        static_cast<std::size_t>(newBytes.size())),
-          &convErr);
-      if (patched.has_value() && !patched->empty()) {
-        { auto lg = gf::core::Log::get(); if (lg) lg->info(
-              "XPR2Replace patch OK: name='{}' patchedSize={}",
-              item->text(0).toStdString(), static_cast<unsigned long long>(patched->size())); }
-        newBytes = QByteArray(reinterpret_cast<const char*>(patched->data()), int(patched->size()));
-      } else {
-        { auto lg = gf::core::Log::get(); if (lg) lg->warn(
-              "XPR2Replace patch FAILED: name='{}' reason='{}'", item->text(0).toStdString(), convErr); }
-        showErrorDialog("XPR2 Conversion Failed",
-                        "Could not convert DDS back to XPR2.",
-                        QString("Base source: %1\nRaw size: %2 bytes\nResolved size: %3 bytes\nSignature: %4\n\n%5")
-                            .arg(resolvedBase.source.isEmpty() ? QString("<none>") : resolvedBase.source)
-                            .arg(qulonglong(resolvedBase.rawSize))
-                            .arg(qulonglong(resolvedBase.bytes.size()))
-                            .arg(hexSignaturePrefix(std::span<const std::uint8_t>(resolvedBase.bytes.data(), resolvedBase.bytes.size())))
-                            .arg(QString::fromStdString(convErr)), false);
+      // Parse original info for the confirmation dialog summary.
+      auto origInfo = gf::textures::parse_original_texture_info(origSpan, astFlags);
+      validationDetails = QString("Original: %1x%2 | %3 | mips=%4\nImport: %5 (%6)")
+          .arg(origInfo ? static_cast<int>(origInfo->width)  : 0)
+          .arg(origInfo ? static_cast<int>(origInfo->height) : 0)
+          .arg(origInfo ? QString("container=%1").arg(static_cast<int>(origInfo->container)) : QString("?"))
+          .arg(origInfo ? static_cast<int>(origInfo->mipCount) : 0)
+          .arg(QFileInfo(inPath).fileName())
+          .arg(importIsTga ? "TGA → auto rebuild" : "DDS advanced");
+
+      // Show confirmation dialog.
+      const QString prompt =
+          QString("This will MODIFY the AST container in memory until you Save.\n\nContainer:\n%1\n\n%2\n\nContinue?")
+              .arg(QDir::toNativeSeparators(containerPath))
+              .arg(validationDetails);
+      if (QMessageBox::question(this, "ASTra Core", prompt,
+                                QMessageBox::Yes | QMessageBox::No,
+                                QMessageBox::No) != QMessageBox::Yes) return;
+
+      // Run the full pipeline.
+      std::string pipelineErr;
+      auto replaceResult = gf::textures::replace_texture(
+          origSpan, importSpan, importFmt, astFlags, &pipelineErr);
+
+      if (!replaceResult || replaceResult->containerBytes.empty()) {
+        { auto lg = gf::core::Log::get(); if (lg) lg->error(
+              "TexReplace pipeline FAILED: name='{}' reason='{}'",
+              item->text(0).toStdString(), pipelineErr); }
+        showErrorDialog("Replace Texture Failed",
+                        "The texture replacement pipeline could not produce a valid container.",
+                        QString::fromStdString(pipelineErr), false);
         return;
       }
-    }
+
+      { auto lg = gf::core::Log::get(); if (lg) lg->info(
+            "TexReplace pipeline OK: name='{}' summary='{}' outSize={}",
+            item->text(0).toStdString(),
+            replaceResult->summary,
+            static_cast<unsigned long long>(replaceResult->containerBytes.size())); }
+
+      // Replace newBytes with the rebuilt container.
+      newBytes = QByteArray(
+          reinterpret_cast<const char*>(replaceResult->containerBytes.data()),
+          static_cast<int>(replaceResult->containerBytes.size()));
+      validationDetails = QString::fromStdString(replaceResult->summary);
+    } // end validateTextureReplacement pipeline block
+
+    QByteArray previewBytes = newBytes;
 
     QByteArray previousStoredBytes;
     if (const auto oldStoredForUndo = ed->getEntryStoredBytes(entryIndex); oldStoredForUndo.has_value()) {

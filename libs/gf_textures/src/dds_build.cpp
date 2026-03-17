@@ -51,9 +51,12 @@ static std::vector<std::uint8_t> make_dds_header(std::uint32_t width,
     // DDSURFACEDESC2 size = 124
     write_u32le(p +  4, 124);
 
-    // Flags
-    const std::uint32_t flags = DDSD_CAPS | DDSD_HEIGHT | DDSD_WIDTH |
-                                DDSD_PIXELFORMAT | DDSD_MIPMAPCOUNT | DDSD_LINEARSIZE;
+    // Flags — DDSD_MIPMAPCOUNT (0x20000) must only be set when mip_count > 1.
+    // Original EA P3R headers use 0x81007 for single-mip textures (no MIPMAPCOUNT bit).
+    // Setting it unconditionally causes the PS3 game loader to misparse the header.
+    std::uint32_t flags = DDSD_CAPS | DDSD_HEIGHT | DDSD_WIDTH |
+                          DDSD_PIXELFORMAT | DDSD_LINEARSIZE;
+    if (mip_count > 1) flags |= DDSD_MIPMAPCOUNT;
     write_u32le(p +  8, flags);
     write_u32le(p + 12, height);
     write_u32le(p + 16, width);

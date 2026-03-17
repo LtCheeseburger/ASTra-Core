@@ -92,6 +92,7 @@ private slots:
   void setAptFrameIndex(int idx);
   void onSave();
   void onShowCoreHelp();
+  void onCheckForUpdates();
   void onSaveAs();
   void onRevert();
   void onAptApply();
@@ -458,6 +459,7 @@ private:
 
   QAction* m_actDevMode = nullptr;
   QAction* m_actUndoLastReplace = nullptr;
+  QAction* m_actCheckForUpdates = nullptr;
   bool m_devMode = false;
 
   bool m_editingEnabled = false;

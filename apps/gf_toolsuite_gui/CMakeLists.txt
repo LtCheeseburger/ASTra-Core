@@ -14,6 +14,9 @@ set(GF_TOOLS_GUI_SOURCES
   src/main.cpp
   src/MainWindow.cpp
   src/AstIndexer.cpp
+  src/update/UpdateChecker.cpp
+  src/update/UpdateDialog.cpp
+  src/update/UpdaterLauncher.cpp
   src/GameSelectorWindow.cpp
   src/NameCache.cpp
   src/PlatformUtils.cpp
@@ -34,6 +37,10 @@ set(GF_TOOLS_GUI_SOURCES
 set(GF_TOOLS_GUI_HEADERS
   src/MainWindow.hpp
   src/AstIndexer.hpp
+  src/update/UpdateChecker.hpp
+  src/update/UpdateDialog.hpp
+  src/update/UpdaterLauncher.hpp
+  src/update/UpdaterConfig.hpp
   src/GameSelectorWindow.hpp
   src/GameLibrary.hpp
   src/AddGameDialog.hpp
