@@ -93,6 +93,7 @@ private slots:
   void onSave();
   void onShowCoreHelp();
   void onCheckForUpdates();
+  void onExportLogs();
   void onSaveAs();
   void onRevert();
   void onAptApply();

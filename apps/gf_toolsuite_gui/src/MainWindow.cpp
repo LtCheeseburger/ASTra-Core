@@ -64,6 +64,7 @@
 #include <QCloseEvent>
 #include <QResizeEvent>
 #include <QFileDialog>
+#include <QStandardPaths>
 #include <QFile>
 #include <QDesktopServices>
 #include <QUrl>
@@ -666,6 +667,14 @@ void MainWindow::showErrorDialog(const QString& title,
                                  const QString& message,
                                  const QString& details,
                                  bool noChangesSaved) {
+  // Always log UI-visible errors so crashes/support sessions have a trail.
+  {
+    const std::string logMsg = (title + ": " + message).toStdString();
+    const std::string logDetail = details.toStdString();
+    gf::core::logError(gf::core::LogCategory::UI, logMsg,
+                       logDetail.empty() ? std::string_view{} : std::string_view{logDetail});
+  }
+
   QMessageBox box(this);
   box.setIcon(QMessageBox::Warning);
   box.setWindowTitle(title);
@@ -905,7 +914,12 @@ static std::vector<std::uint8_t> maybe_rebuild_ea_dds(std::span<const std::uint8
         return *rebuilt;
       }
     }
+  } catch (const std::exception& ex) {
+    gf::core::logWarn(gf::core::LogCategory::DdsConversion,
+                      "maybe_rebuild_ea_dds threw exception", ex.what());
   } catch (...) {
+    gf::core::logWarn(gf::core::LogCategory::DdsConversion,
+                      "maybe_rebuild_ea_dds threw unknown exception");
   }
   return {};
 }
@@ -929,7 +943,12 @@ static std::optional<gf::textures::DdsInfo> tryParseTextureDdsInfo(std::span<con
     if (!rebuilt.empty()) {
       return gf::textures::parse_dds_info(std::span<const std::uint8_t>(rebuilt.data(), rebuilt.size()));
     }
+  } catch (const std::exception& ex) {
+    gf::core::logWarn(gf::core::LogCategory::DdsConversion,
+                      "tryParseTextureDdsInfo threw exception", ex.what());
   } catch (...) {
+    gf::core::logWarn(gf::core::LogCategory::DdsConversion,
+                      "tryParseTextureDdsInfo threw unknown exception");
   }
   return std::nullopt;
 }
@@ -2028,11 +2047,15 @@ void MainWindow::onRsfPreviewTransformEdited(int materialIndex, const gf::models
 
 bool MainWindow::applyRsfChanges() {
   if (!m_rsfCurrentDoc || m_rsfOriginalBytes.isEmpty()) return false;
+  gf::core::logBreadcrumb(gf::core::LogCategory::FileIO,
+                          "Apply RSF changes: " + m_rsfSourcePath.toStdString());
   pullRsfUiIntoDocument();
   std::vector<std::uint8_t> original(static_cast<std::size_t>(m_rsfOriginalBytes.size()));
   std::memcpy(original.data(), m_rsfOriginalBytes.constData(), static_cast<std::size_t>(m_rsfOriginalBytes.size()));
   const auto rebuilt = gf::models::rsf::rebuild(*m_rsfCurrentDoc, std::span<const std::uint8_t>(original.data(), original.size()));
   if (rebuilt.empty() || !gf::models::rsf::parse(std::span<const std::uint8_t>(rebuilt.data(), rebuilt.size())).has_value()) {
+    gf::core::logError(gf::core::LogCategory::FileIO,
+                       "Apply RSF failed: rebuild produced invalid RSF", m_rsfSourcePath.toStdString());
     showErrorDialog("Apply RSF", "Failed to rebuild a valid RSF.");
     return false;
   }
@@ -2061,6 +2084,8 @@ void MainWindow::setMode(Mode m) {
 }
 
 void MainWindow::openStandaloneAst(const QString& astPath) {
+  gf::core::logInfo(gf::core::LogCategory::AstParsing,
+                    "Opening standalone AST", astPath.toStdString());
   setMode(Mode::Standalone);
   m_cacheId = cacheIdFromSeed(astPath);
   m_nameCache.loadForGame(m_cacheId);
@@ -2091,6 +2116,9 @@ void MainWindow::openGame(const QString& displayName,
                           const QString& rootPath,
                           const QString& baseContentDir,
                           const QString& updateContentDir) {
+  gf::core::logInfo(gf::core::LogCategory::General,
+                    "Opening game library",
+                    (displayName + " | root=" + rootPath).toStdString());
   setMode(Mode::Game);
   m_lastGameDisplayName = displayName;
   m_lastGameRootPath = rootPath;
@@ -2124,6 +2152,62 @@ void MainWindow::onShowCoreHelp() {
   text += "• Minimal RSF structured table editing\n\n";
   text += "Intentionally not included in ASTra Core: old RSF scene/model viewers, APT workflows, and DAT workflows.";
   QMessageBox::information(this, "About ASTra Core", text);
+}
+
+void MainWindow::onExportLogs() {
+  const QString logFile = QString::fromStdString(gf::core::Log::logFilePath());
+  if (logFile.isEmpty()) {
+    showInfoDialog("Export Logs",
+                   "No log file path is available (logger may not be initialised).");
+    return;
+  }
+
+  const QFileInfo logInfo(logFile);
+  const QString dest = QFileDialog::getExistingDirectory(
+      this, "Export Logs \u2014 Choose Destination Folder",
+      QStandardPaths::writableLocation(QStandardPaths::DesktopLocation));
+  if (dest.isEmpty()) return;
+
+  // Flush so the exported copy captures the most recent entries.
+  if (auto lg = gf::core::Log::get()) lg->flush();
+
+  // Collect astra.log + all rotated files (astra.log.1 … astra.log.5).
+  QDir srcDir = logInfo.absoluteDir();
+  const QString base = logInfo.fileName();
+  const QStringList candidates = srcDir.entryList(
+      QStringList{base, base + ".*"}, QDir::Files, QDir::Name);
+
+  if (candidates.isEmpty()) {
+    showInfoDialog("Export Logs",
+                   QString("No log files found in:\n%1")
+                       .arg(QDir::toNativeSeparators(srcDir.absolutePath())));
+    return;
+  }
+
+  int copied = 0;
+  QStringList failed;
+  for (const QString& name : candidates) {
+    const QString src = srcDir.absoluteFilePath(name);
+    const QString dst = QDir(dest).absoluteFilePath(name);
+    if (QFile::exists(dst)) QFile::remove(dst);
+    if (QFile::copy(src, dst)) ++copied;
+    else failed << name;
+  }
+
+  if (failed.isEmpty()) {
+    gf::core::logInfo(gf::core::LogCategory::General,
+                      "Log export succeeded",
+                      std::to_string(copied) + " file(s) -> " + dest.toStdString());
+    toastOk(QString("Exported %1 log file(s) to %2").arg(copied).arg(dest));
+    showInfoDialog("Export Logs",
+                   QString("Exported %1 log file(s) to:\n%2\n\nAttach these files to GitHub issues or Discord support requests.")
+                       .arg(copied)
+                       .arg(QDir::toNativeSeparators(dest)));
+  } else {
+    showErrorDialog("Export Logs",
+                    QString("Exported %1 file(s). Failed to copy: %2")
+                        .arg(copied).arg(failed.join(", ")));
+  }
 }
 
 void MainWindow::onCheckForUpdates() {
@@ -2234,8 +2318,11 @@ void MainWindow::buildUi() {
   m_actCoreHelp = helpMenu->addAction("ASTra Core Help");
   connect(m_actCoreHelp, &QAction::triggered, this, &MainWindow::onShowCoreHelp);
 
+  auto* actExportLogs = helpMenu->addAction("Export Logs\u2026");
+  connect(actExportLogs, &QAction::triggered, this, &MainWindow::onExportLogs);
+
   helpMenu->addSeparator();
-  m_actCheckForUpdates = helpMenu->addAction("Check for Updates…");
+  m_actCheckForUpdates = helpMenu->addAction("Check for Updates\u2026");
   connect(m_actCheckForUpdates, &QAction::triggered,
           this, &MainWindow::onCheckForUpdates);
 
@@ -3526,6 +3613,8 @@ void MainWindow::onOpenApt() {
 }
 
 void MainWindow::openStandaloneApt(const QString& aptPath) {
+  gf::core::logInfo(gf::core::LogCategory::General,
+                    "Opening standalone APT", aptPath.toStdString());
   setMode(Mode::Standalone);
   m_cacheId = cacheIdFromSeed(aptPath);
   m_nameCache.loadForGame(m_cacheId);
@@ -3711,6 +3800,9 @@ void MainWindow::onSaveAs() {
                                                        "EA Archives (*.ast *.bgfa);;All Files (*.*)");
   if (outPath.isEmpty()) return;
 
+  gf::core::logBreadcrumb(gf::core::LogCategory::FileIO,
+                          "Save As: " + outPath.toStdString());
+
   struct SaveAsResult {
     bool ok = false;
     QString error;
@@ -3736,10 +3828,14 @@ void MainWindow::onSaveAs() {
     updateDocumentActions();
 
     if (!result.ok) {
+      gf::core::logError(gf::core::LogCategory::FileIO,
+                         "Save As write failed", result.error.toStdString());
       showErrorDialog("Save As", "Write failed.", result.error, false);
       return;
     }
 
+    gf::core::logInfo(gf::core::LogCategory::FileIO,
+                      "Save As succeeded", outPath.toStdString());
     toastOk(QString("Saved As %1").arg(QFileInfo(outPath).fileName()));
     statusBar()->showMessage(QString("Saved As → %1").arg(QDir::toNativeSeparators(outPath)), 4000);
   });
@@ -3817,6 +3913,9 @@ void MainWindow::onSave() {
     astPath = m_liveAstPath;
   }
 
+  gf::core::logBreadcrumb(gf::core::LogCategory::FileIO,
+                          "Save: " + (astPath.isEmpty() ? "<no path>" : astPath.toStdString()));
+
   m_saveInProgress = true;
   if (m_actSave) m_actSave->setEnabled(false);
   if (m_actSaveAs) m_actSaveAs->setEnabled(false);
@@ -3832,12 +3931,16 @@ void MainWindow::onSave() {
     updateDocumentActions();
 
     if (!result.ok) {
+      gf::core::logError(gf::core::LogCategory::FileIO,
+                         "Save failed: write AST container", result.error.toStdString());
       showErrorDialog("Save", "Failed to write AST container.", result.error, true);
       return;
     }
 
     const bool ok = m_nameCache.save();
     if (!ok) {
+      gf::core::logError(gf::core::LogCategory::FileIO,
+                         "Save failed: could not save name cache");
       showErrorDialog("Save", "Failed to save name cache.", QString(), true);
       return;
     }
@@ -3901,6 +4004,8 @@ void MainWindow::onRevert() {
 }
 
 void MainWindow::exportCopyOf(const QString& sourcePath) {
+  gf::core::logBreadcrumb(gf::core::LogCategory::FileIO,
+                          "Export copy: " + sourcePath.toStdString());
   QFileInfo fi(sourcePath);
   const QString base = fi.completeBaseName().isEmpty() ? fi.fileName() : fi.completeBaseName();
   QString ext = normalizeExt(fi.suffix());
@@ -3916,12 +4021,16 @@ void MainWindow::exportCopyOf(const QString& sourcePath) {
 
   QFile in(sourcePath);
   if (!in.open(QIODevice::ReadOnly)) {
+    gf::core::logError(gf::core::LogCategory::FileIO,
+                       "Export failed: cannot open source file for reading", sourcePath.toStdString());
     showErrorDialog("Export Failed", "Failed to open source file for reading.", QString(), false);
     return;
   }
 
   constexpr qint64 kMaxExport = 1024ll * 1024ll * 1024ll; // 1 GiB safety cap
   if (in.size() > kMaxExport) {
+    gf::core::logWarn(gf::core::LogCategory::FileIO,
+                      "Export refused: file exceeds 1 GiB safety cap", sourcePath.toStdString());
     showErrorDialog("Export Failed", "Refusing to export: file is larger than the safety cap (1 GiB).", "If you need this, we can implement streaming export next.", false);
     return;
   }
@@ -3936,6 +4045,8 @@ void MainWindow::exportCopyOf(const QString& sourcePath) {
                                             std::span<const std::byte>(bptr, static_cast<std::size_t>(bytes.size())),
                                             opt);
   if (!r.ok) {
+    gf::core::logError(gf::core::LogCategory::FileIO,
+                       "Export failed: write error", r.message + " -> " + outPath.toStdString());
     showErrorDialog("Export Failed", "Export failed.", QString::fromStdString(r.message), false);
     return;
   }
@@ -3944,6 +4055,8 @@ void MainWindow::exportCopyOf(const QString& sourcePath) {
   if (r.backup_path) {
     msg += QString("\nBackup created: %1").arg(QString::fromStdString(r.backup_path->string()));
   }
+  gf::core::logInfo(gf::core::LogCategory::FileIO,
+                    "Export succeeded", outPath.toStdString());
   toastOk(QString("Exported %1").arg(QFileInfo(outPath).fileName()));
   showInfoDialog("Export", msg);
 }
@@ -3955,6 +4068,9 @@ void MainWindow::onUndoLastReplace() {
     showInfoDialog("Undo Last Replace", "There is no in-memory replacement to undo.");
     return;
   }
+
+  gf::core::logBreadcrumb(gf::core::LogCategory::TextureReplace,
+                          "Undo last replace: " + m_lastReplaceUndo.displayName.toStdString());
 
   std::string err;
   std::optional<gf::core::AstContainerEditor> loaded;
@@ -4034,6 +4150,8 @@ void MainWindow::onRestoreLatestBackup() {
   if (m_doc.path.isEmpty()) return;
 
   const QString targetPath = m_doc.path;
+  gf::core::logBreadcrumb(gf::core::LogCategory::FileIO,
+                          "Restore latest backup: " + targetPath.toStdString());
   const QFileInfo fi(targetPath);
   const QDir dir = fi.absoluteDir();
   const QString baseName = fi.fileName();
@@ -4073,10 +4191,14 @@ void MainWindow::onRestoreLatestBackup() {
                                             std::span<const std::byte>(bptr, static_cast<std::size_t>(bytes.size())),
                                             opt);
   if (!r.ok) {
+    gf::core::logError(gf::core::LogCategory::FileIO,
+                       "Restore backup failed", r.message + " -> " + targetPath.toStdString());
     showErrorDialog("Restore Backup Failed", "Restore failed.", QString::fromStdString(r.message), false);
     return;
   }
 
+  gf::core::logInfo(gf::core::LogCategory::FileIO,
+                    "Restore backup succeeded", targetPath.toStdString());
   statusBar()->showMessage("Restored latest backup (current file was backed up).", 4000);
   // Reload UI
   openStandaloneAst(targetPath);
@@ -4381,7 +4503,14 @@ void MainWindow::applyIndexToTree(const QVector<AstIndexEntry>& entries,
           auto idxOpt = gf::core::AstArchive::readIndex(std::filesystem::path(astPath.toStdString()), &err);
           if (!idxOpt) return {QString(), QString(), false};
           return deriveFriendlyAstContainerMeta(*idxOpt);
+        } catch (const std::exception& ex) {
+          gf::core::logWarn(gf::core::LogCategory::AstParsing,
+                            "Exception while reading AST index for friendly name",
+                            ex.what());
+          return {QString(), QString(), false};
         } catch (...) {
+          gf::core::logWarn(gf::core::LogCategory::AstParsing,
+                            "Unknown exception while reading AST index for friendly name");
           return {QString(), QString(), false};
         }
       }));
@@ -5026,25 +5155,40 @@ if (isEmbedded) {
     try {
       std::string err;
       if (!isEmbedded) {
+        gf::core::logBreadcrumb(gf::core::LogCategory::AstParsing,
+                                "readIndex: " + path.toStdString());
         r.idx = gf::core::AstArchive::readIndex(std::filesystem::path(path.toStdString()), &err);
         r.message = QString::fromStdString(err);
+        if (!r.idx && !err.empty())
+          gf::core::logError(gf::core::LogCategory::AstParsing,
+                             "readIndex failed", err);
         return r;
       }
 
       // Embedded AST inside parent AST file.
+      gf::core::logBreadcrumb(gf::core::LogCategory::AstParsing,
+                              std::string("readEmbedded: ") + path.toStdString()
+                              + " @offset=" + std::to_string(baseOffset));
       r.idx = gf::core::AstArchive::readEmbeddedIndexFromFileSmart(std::filesystem::path(path.toStdString()),
                                                                    static_cast<std::uint64_t>(baseOffset),
                                                                    static_cast<std::uint64_t>(maxReadable),
                                                                    &err);
       r.message = QString::fromStdString(err);
+      if (!r.idx && !err.empty())
+        gf::core::logError(gf::core::LogCategory::AstParsing,
+                           "readEmbedded failed", err);
       return r;
     } catch (const std::exception& ex) {
       r.idx = std::nullopt;
       r.message = QString("Exception during AST parse: %1").arg(ex.what());
+      gf::core::logError(gf::core::LogCategory::AstParsing,
+                         "Exception during AST parse", ex.what());
       return r;
     } catch (...) {
       r.idx = std::nullopt;
       r.message = QString("Unknown exception during AST parse.");
+      gf::core::logError(gf::core::LogCategory::AstParsing,
+                         "Unknown exception during AST parse", path.toStdString());
       return r;
     }
   });
@@ -5438,11 +5582,13 @@ void MainWindow::onTreeContextMenu(const QPoint& pos) {
 
       // Resolve the original container payload (needed by the pipeline and XPR2 patch).
       auto resolvedBase = resolveTexturePayloadForEditor(item, typeUpper, *ed, entryIndex);
+      gf::core::logBreadcrumb(gf::core::LogCategory::TextureReplace,
+                              std::string("pipeline start: entry='") + item->text(0).toStdString()
+                              + "' type=" + typeUpper.toStdString()
+                              + " importFmt=" + (importIsTga ? "TGA" : "DDS")
+                              + " src=" + resolvedBase.source.toStdString());
       { auto lg = gf::core::Log::get(); if (lg) lg->info(
-            "TexReplace pipeline start: name='{}' type={} importFmt={} src={} raw={} resolved={} sig=[{}]",
-            item->text(0).toStdString(), typeUpper.toStdString(),
-            importIsTga ? "TGA" : "DDS",
-            resolvedBase.source.toStdString(),
+            "[Texture replace] payload raw={} resolved={} sig=[{}]",
             static_cast<unsigned long long>(resolvedBase.rawSize),
             static_cast<unsigned long long>(resolvedBase.bytes.size()),
             hexSignaturePrefix(std::span<const std::uint8_t>(resolvedBase.bytes.data(), resolvedBase.bytes.size())).toStdString()); }
@@ -5499,9 +5645,13 @@ void MainWindow::onTreeContextMenu(const QPoint& pos) {
           : gf::textures::TexImportFormat::DDS_Advanced;
 
       // Quick pre-flight validation (cheap — no BC compression).
+      gf::core::logBreadcrumb(gf::core::LogCategory::TextureReplace, "preflight validation");
       const std::string preflightErr = gf::textures::validate_texture_import(
           origSpan, importSpan, importFmt, astFlags);
       if (!preflightErr.empty()) {
+        gf::core::logError(gf::core::LogCategory::Validation,
+                           "Texture preflight validation failed",
+                           preflightErr + " | entry=" + item->text(0).toStdString());
         showErrorDialog("Replace Texture Failed",
                         "Import file is not compatible with the original texture.",
                         QString::fromStdString(preflightErr), false);
@@ -5528,25 +5678,26 @@ void MainWindow::onTreeContextMenu(const QPoint& pos) {
                                 QMessageBox::No) != QMessageBox::Yes) return;
 
       // Run the full pipeline.
+      gf::core::logBreadcrumb(gf::core::LogCategory::TextureReplace, "running replace_texture pipeline");
       std::string pipelineErr;
       auto replaceResult = gf::textures::replace_texture(
           origSpan, importSpan, importFmt, astFlags, &pipelineErr);
 
       if (!replaceResult || replaceResult->containerBytes.empty()) {
-        { auto lg = gf::core::Log::get(); if (lg) lg->error(
-              "TexReplace pipeline FAILED: name='{}' reason='{}'",
-              item->text(0).toStdString(), pipelineErr); }
+        gf::core::logError(gf::core::LogCategory::TextureReplace,
+                           "Pipeline failed: replace_texture returned empty result",
+                           pipelineErr + " | entry=" + item->text(0).toStdString());
         showErrorDialog("Replace Texture Failed",
                         "The texture replacement pipeline could not produce a valid container.",
                         QString::fromStdString(pipelineErr), false);
         return;
       }
 
-      { auto lg = gf::core::Log::get(); if (lg) lg->info(
-            "TexReplace pipeline OK: name='{}' summary='{}' outSize={}",
-            item->text(0).toStdString(),
-            replaceResult->summary,
-            static_cast<unsigned long long>(replaceResult->containerBytes.size())); }
+      gf::core::logInfo(gf::core::LogCategory::TextureReplace,
+                        "Pipeline succeeded",
+                        replaceResult->summary + " | outSize="
+                        + std::to_string(replaceResult->containerBytes.size())
+                        + " | entry=" + item->text(0).toStdString());
 
       // Replace newBytes with the rebuilt container.
       newBytes = QByteArray(
@@ -5570,6 +5721,9 @@ void MainWindow::onTreeContextMenu(const QPoint& pos) {
                                                          static_cast<std::size_t>(newBytes.size()));
     if (!ed->replaceEntryBytes(entryIndex, spanBytes,
                                gf::core::AstContainerEditor::ReplaceMode::PreserveZlibIfPresent, &err)) {
+      gf::core::logError(gf::core::LogCategory::TextureReplace,
+                         "replaceEntryBytes failed",
+                         err + " | entry=" + item->text(0).toStdString());
       showErrorDialog(validateTextureReplacement ? "Replace Texture Failed" : "Replace Failed",
                       "The entry could not be replaced.", QString::fromStdString(err), true);
       return;
@@ -5580,6 +5734,8 @@ void MainWindow::onTreeContextMenu(const QPoint& pos) {
       std::string rebuildErr;
       auto newNestedBytes = innerEdOpt->rebuild(&rebuildErr);
       if (newNestedBytes.empty() && !rebuildErr.empty()) {
+        gf::core::logError(gf::core::LogCategory::TextureReplace,
+                           "Nested AST rebuild failed after replacement", rebuildErr);
         showErrorDialog("Rebuild Failed",
                         "Cannot rebuild nested AST after replacement.",
                         QString::fromStdString(rebuildErr), true);
@@ -5590,6 +5746,8 @@ void MainWindow::onTreeContextMenu(const QPoint& pos) {
       if (!outerEdOpt->replaceEntryBytes(nestedOuterIdx, nestedSpan,
                                          gf::core::AstContainerEditor::ReplaceMode::PreserveZlibIfPresent,
                                          &err)) {
+        gf::core::logError(gf::core::LogCategory::TextureReplace,
+                           "Repack nested AST into outer container failed", err);
         showErrorDialog("Repack Failed",
                         "Cannot repack nested AST into outer container.",
                         QString::fromStdString(err), true);
@@ -5610,6 +5768,9 @@ void MainWindow::onTreeContextMenu(const QPoint& pos) {
     m_lastReplaceUndo.itemCacheKey = makeTreeCacheKey(item);
     m_lastReplaceUndo.displayName = item->text(0).trimmed();
     if (m_actUndoLastReplace) m_actUndoLastReplace->setEnabled(m_lastReplaceUndo.valid);
+    gf::core::logInfo(gf::core::LogCategory::TextureReplace,
+                      "Entry replace committed — pending save",
+                      item->text(0).toStdString() + " | " + containerPath.toStdString());
     setDirty(true);
 
     if (validateTextureReplacement && m_viewTabs && m_imageView) {
