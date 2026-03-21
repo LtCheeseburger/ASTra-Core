@@ -147,6 +147,10 @@ std::string_view logCategoryTag(LogCategory cat) {
     case LogCategory::TexturePreview: return "[Texture preview]";
     case LogCategory::Validation:     return "[Validation]";
     case LogCategory::UI:             return "[UI]";
+    case LogCategory::FileDetection:  return "[File detection]";
+    case LogCategory::Routing:        return "[Routing]";
+    case LogCategory::Update:         return "[Update]";
+    case LogCategory::Network:        return "[Network]";
     case LogCategory::Unknown:        return "[Unknown]";
   }
   return "[Unknown]";

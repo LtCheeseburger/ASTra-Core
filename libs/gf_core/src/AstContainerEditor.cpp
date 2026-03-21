@@ -700,6 +700,17 @@ bool AstContainerEditor::validate(std::span<const std::uint8_t> data, std::strin
   return true;
 }
 
+AstContainerEditor::AstValidationReport
+AstContainerEditor::validateWithReport(std::span<const std::uint8_t> data) {
+  AstValidationReport report;
+  std::string errMsg;
+  report.ok = validate(data, &errMsg);
+  if (!report.ok) {
+    report.firstError = std::move(errMsg);
+  }
+  return report;
+}
+
 std::optional<std::vector<std::uint8_t>> AstContainerEditor::getEntryStoredBytes(std::uint32_t entryIndex) const {
   for (const auto& e : m_entries) {
     if (e.index == entryIndex) return e.storedBytes;

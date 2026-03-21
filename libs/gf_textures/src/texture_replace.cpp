@@ -157,6 +157,11 @@ static std::optional<std::vector<std::uint8_t>> build_dds_payload(
     return dds;
 }
 
+// Returns true if v is a power of two (and non-zero).
+static bool is_power_of_two(std::uint32_t v) noexcept {
+    return v > 0 && (v & (v - 1)) == 0;
+}
+
 // Validate that source dimensions are acceptable for the target.
 // Strict mode: must be identical.
 static std::string check_dimensions(const RgbaSource& src, const OriginalTextureInfo& orig) {
@@ -166,6 +171,28 @@ static std::string check_dimensions(const RgbaSource& src, const OriginalTexture
            << " do not match original " << orig.width << "x" << orig.height << ".";
         return os.str();
     }
+
+    // BC-compressed formats require dimensions that are multiples of 4.
+    // A 0-mod-4 check on the *original* dimensions covers the common case since
+    // source and original must match at this point.
+    if ((orig.width % 4 != 0) || (orig.height % 4 != 0)) {
+        std::ostringstream os;
+        os << "BC-compressed textures require width and height to be multiples of 4. "
+           << "Original dimensions are " << orig.width << "x" << orig.height
+           << " — replacement would produce an invalid texture.";
+        return os.str();
+    }
+
+    // XPR2 (Xbox 360) textures additionally require power-of-2 dimensions.
+    if (orig.container == TexContainerKind::XPR2) {
+        if (!is_power_of_two(orig.width) || !is_power_of_two(orig.height)) {
+            std::ostringstream os;
+            os << "XPR2 (Xbox 360) textures require power-of-2 dimensions. "
+               << "Original dimensions are " << orig.width << "x" << orig.height << ".";
+            return os.str();
+        }
+    }
+
     return {};
 }
 
@@ -201,6 +228,18 @@ static std::string check_dds_contract(
     if (importCode != orig.bcFormatCode)
         issues << "Format mismatch: DDS=" << bc_code_name(importCode)
                << " original=" << bc_code_name(orig.bcFormatCode) << ". ";
+
+    // BC formats require dimensions to be multiples of 4.
+    if (info->width % 4 != 0 || info->height % 4 != 0)
+        issues << "DDS dimensions (" << info->width << "x" << info->height
+               << ") are not multiples of 4 as required by BC block compression. ";
+
+    // XPR2 additionally requires power-of-2 dimensions.
+    if (orig.container == TexContainerKind::XPR2) {
+        if (!is_power_of_two(info->width) || !is_power_of_two(info->height))
+            issues << "XPR2 target requires power-of-2 dimensions; DDS reports "
+                   << info->width << "x" << info->height << ". ";
+    }
 
     return issues.str();
 }

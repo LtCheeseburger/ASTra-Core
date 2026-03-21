@@ -17,6 +17,8 @@ set(GF_TOOLS_GUI_SOURCES
   src/update/UpdateChecker.cpp
   src/update/UpdateDialog.cpp
   src/update/UpdaterLauncher.cpp
+  src/update/VersionBadgeWidget.cpp
+  src/OperationStatusDialog.cpp
   src/GameSelectorWindow.cpp
   src/NameCache.cpp
   src/PlatformUtils.cpp
@@ -41,6 +43,8 @@ set(GF_TOOLS_GUI_HEADERS
   src/update/UpdateDialog.hpp
   src/update/UpdaterLauncher.hpp
   src/update/UpdaterConfig.hpp
+  src/update/VersionBadgeWidget.hpp
+  src/OperationStatusDialog.hpp
   src/GameSelectorWindow.hpp
   src/GameLibrary.hpp
   src/AddGameDialog.hpp

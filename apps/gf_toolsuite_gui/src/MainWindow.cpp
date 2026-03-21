@@ -4,6 +4,8 @@
 #include "update/UpdateDialog.hpp"
 #include "update/UpdaterLauncher.hpp"
 #include "update/UpdaterConfig.hpp"
+#include "update/VersionBadgeWidget.hpp"
+#include "OperationStatusDialog.hpp"
 
 #include <gf/apt/apt_xml.hpp>
 #include <gf/apt/apt_reader.hpp>
@@ -13,6 +15,7 @@
 #include "PlatformUtils.hpp"
 #include "gf/core/log.hpp"
 #include "gf/core/AstArchive.hpp"
+#include "gf/core/file_detection.hpp"
 #include "gf/core/AstContainerEditor.hpp"
 #include "gf/core/safe_write.hpp"
 
@@ -89,6 +92,7 @@
 #include <QPainter>
 #include <QScopeGuard>
 #include <QSignalBlocker>
+#include <QTimer>
 
 #include "GuiSettings.hpp"
 #include "apt_editor/AptPreviewScene.hpp"
@@ -1639,6 +1643,10 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
   buildUi();
 
+  // Non-blocking startup update check — fires 4 s after the window is ready
+  // so it does not delay first paint.  Uses the channel stored in QSettings.
+  QTimer::singleShot(4000, this, &MainWindow::onStartupUpdateCheck);
+
   // Tool is always dark-mode (no toggle). We don't force a palette here because
   // you may already be applying a global dark style in main().
 }
@@ -2210,68 +2218,120 @@ void MainWindow::onExportLogs() {
   }
 }
 
+// ── Update check helpers ──────────────────────────────────────────────────────
+
+static gf::gui::update::UpdateChannel loadUpdateChannel() {
+    QSettings s(kSettingsOrg, kSettingsApp);
+    const int v = s.value(QStringLiteral("update/channel"), 0).toInt();
+    switch (v) {
+        case 1: return gf::gui::update::UpdateChannel::Beta;
+        case 2: return gf::gui::update::UpdateChannel::Nightly;
+        default: return gf::gui::update::UpdateChannel::Stable;
+    }
+}
+
+void MainWindow::triggerUpdateCheck(bool silent) {
+    auto* checker = new gf::gui::update::UpdateChecker(
+        QStringLiteral(ASTRA_GITHUB_OWNER),
+        QStringLiteral(ASTRA_GITHUB_REPO),
+        this);
+    checker->setChannel(loadUpdateChannel());
+
+    if (m_versionBadge)
+        m_versionBadge->setStatusChecking();
+
+    // ── Always: update the badge ───────────────────────────────────────────
+    connect(checker, &gf::gui::update::UpdateChecker::updateAvailable,
+            this, [this](const gf::gui::update::ReleaseInfo& info) {
+        if (m_versionBadge)
+            m_versionBadge->setStatusUpdateAvailable(info);
+    });
+    connect(checker, &gf::gui::update::UpdateChecker::upToDate,
+            this, [this]() {
+        if (m_versionBadge)
+            m_versionBadge->setStatusLatest();
+    });
+    connect(checker, &gf::gui::update::UpdateChecker::checkFailed,
+            this, [this](const QString& reason) {
+        if (m_versionBadge)
+            m_versionBadge->setStatusError(reason);
+    });
+
+    if (!silent) {
+        // ── Interactive: show dialogs on top of badge updates ──────────────
+        if (m_actCheckForUpdates)
+            m_actCheckForUpdates->setEnabled(false);
+
+        connect(checker, &gf::gui::update::UpdateChecker::updateAvailable,
+                this, [this, checker](const gf::gui::update::ReleaseInfo& info) {
+            checker->deleteLater();
+            if (m_actCheckForUpdates) m_actCheckForUpdates->setEnabled(true);
+
+            auto* dlg = new gf::gui::update::UpdateDialog(info, this);
+            dlg->setAttribute(Qt::WA_DeleteOnClose);
+
+            connect(dlg, &gf::gui::update::UpdateDialog::updateRequested,
+                    this, [this](const gf::gui::update::ReleaseInfo& releaseInfo) {
+                auto* launcher = new gf::gui::update::UpdaterLauncher(this, this);
+
+                connect(launcher, &gf::gui::update::UpdaterLauncher::updateReadyToInstall,
+                        this, [this]() {
+                    gf::core::logInfo(gf::core::LogCategory::Update,
+                                      "Update helper launched – closing ASTra");
+                    QApplication::quit();
+                });
+
+                connect(launcher, &gf::gui::update::UpdaterLauncher::downloadFailed,
+                        this, [this, launcher](const QString& reason) {
+                    QMessageBox::critical(this, tr("Update Failed"),
+                        tr("The update could not be downloaded or applied:\n\n%1")
+                            .arg(reason));
+                    launcher->deleteLater();
+                });
+
+                launcher->startUpdate(releaseInfo);
+            });
+
+            dlg->exec();
+        });
+
+        connect(checker, &gf::gui::update::UpdateChecker::upToDate,
+                this, [this, checker]() {
+            checker->deleteLater();
+            if (m_actCheckForUpdates) m_actCheckForUpdates->setEnabled(true);
+
+            auto* dlg = new gf::gui::update::UpToDateDialog(this);
+            dlg->setAttribute(Qt::WA_DeleteOnClose);
+            dlg->exec();
+        });
+
+        connect(checker, &gf::gui::update::UpdateChecker::checkFailed,
+                this, [this, checker](const QString& errorMessage) {
+            checker->deleteLater();
+            if (m_actCheckForUpdates) m_actCheckForUpdates->setEnabled(true);
+
+            QMessageBox::warning(this, tr("Update Check Failed"),
+                tr("Could not check for updates:\n\n%1").arg(errorMessage));
+        });
+    } else {
+        // Silent: just clean up the checker when done.
+        connect(checker, &gf::gui::update::UpdateChecker::updateAvailable,
+                checker, &QObject::deleteLater);
+        connect(checker, &gf::gui::update::UpdateChecker::upToDate,
+                checker, &QObject::deleteLater);
+        connect(checker, &gf::gui::update::UpdateChecker::checkFailed,
+                checker, &QObject::deleteLater);
+    }
+
+    checker->checkForUpdates();
+}
+
+void MainWindow::onStartupUpdateCheck() {
+    triggerUpdateCheck(/*silent=*/true);
+}
+
 void MainWindow::onCheckForUpdates() {
-  // Disable the menu action while a check is already in progress to prevent
-  // spawning multiple simultaneous requests.
-  if (m_actCheckForUpdates)
-    m_actCheckForUpdates->setEnabled(false);
-
-  auto* checker = new gf::gui::update::UpdateChecker(
-      QStringLiteral(ASTRA_GITHUB_OWNER),
-      QStringLiteral(ASTRA_GITHUB_REPO),
-      this);
-
-  connect(checker, &gf::gui::update::UpdateChecker::updateAvailable,
-          this, [this, checker](const gf::gui::update::ReleaseInfo& info) {
-      checker->deleteLater();
-      if (m_actCheckForUpdates) m_actCheckForUpdates->setEnabled(true);
-
-      auto* dlg = new gf::gui::update::UpdateDialog(info, this);
-      dlg->setAttribute(Qt::WA_DeleteOnClose);
-
-      connect(dlg, &gf::gui::update::UpdateDialog::updateRequested,
-              this, [this](const gf::gui::update::ReleaseInfo& releaseInfo) {
-          auto* launcher = new gf::gui::update::UpdaterLauncher(this, this);
-
-          connect(launcher, &gf::gui::update::UpdaterLauncher::updateReadyToInstall,
-                  this, [this]() {
-              gf::core::Log::get()->info("[Updater] Update launched – closing ASTra");
-              QApplication::quit();
-          });
-
-          connect(launcher, &gf::gui::update::UpdaterLauncher::downloadFailed,
-                  this, [this, launcher](const QString& reason) {
-              QMessageBox::critical(this, tr("Update Failed"),
-                  tr("The update could not be downloaded or applied:\n\n%1").arg(reason));
-              launcher->deleteLater();
-          });
-
-          launcher->startUpdate(releaseInfo);
-      });
-
-      dlg->exec();
-  });
-
-  connect(checker, &gf::gui::update::UpdateChecker::upToDate,
-          this, [this, checker]() {
-      checker->deleteLater();
-      if (m_actCheckForUpdates) m_actCheckForUpdates->setEnabled(true);
-
-      auto* dlg = new gf::gui::update::UpToDateDialog(this);
-      dlg->setAttribute(Qt::WA_DeleteOnClose);
-      dlg->exec();
-  });
-
-  connect(checker, &gf::gui::update::UpdateChecker::checkFailed,
-          this, [this, checker](const QString& errorMessage) {
-      checker->deleteLater();
-      if (m_actCheckForUpdates) m_actCheckForUpdates->setEnabled(true);
-
-      QMessageBox::warning(this, tr("Update Check Failed"),
-          tr("Could not check for updates:\n\n%1").arg(errorMessage));
-  });
-
-  checker->checkForUpdates();
+    triggerUpdateCheck(/*silent=*/false);
 }
 
 void MainWindow::buildUi() {
@@ -2344,6 +2404,17 @@ void MainWindow::buildUi() {
   tb->addAction(m_actSaveAs);
   tb->addAction(m_actRevert);
 
+  // Right-align the version badge by filling remaining space with a spacer.
+  auto* toolbarSpacer = new QWidget(this);
+  toolbarSpacer->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+  tb->addWidget(toolbarSpacer);
+
+  m_versionBadge = new gf::gui::update::VersionBadgeWidget(
+      ASTRA_CURRENT_VERSION_QSTRING, this);
+  connect(m_versionBadge, &gf::gui::update::VersionBadgeWidget::clicked,
+          this, &MainWindow::onCheckForUpdates);
+  tb->addWidget(m_versionBadge);
+
   // ---- Status bar ----
   auto* sb = new QStatusBar(this);
   setStatusBar(sb);
@@ -2369,6 +2440,15 @@ void MainWindow::buildUi() {
   m_statusMetaLabel->setText("");
   m_statusMetaLabel->setVisible(false);
   statusBar()->addPermanentWidget(m_statusMetaLabel);
+
+  auto* sepKind = new QLabel(" | ", this);
+  statusBar()->addPermanentWidget(sepKind);
+
+  m_statusKindLabel = new QLabel(this);
+  m_statusKindLabel->setText("");
+  m_statusKindLabel->setVisible(false);
+  m_statusKindLabel->setToolTip("Detected file kind (from central detection system)");
+  statusBar()->addPermanentWidget(m_statusKindLabel);
 
   auto* sep3 = new QLabel(" | ", this);
   statusBar()->addPermanentWidget(sep3);
@@ -3197,6 +3277,35 @@ textTab->addAction(m_textSaveShortcutAction);
   m_viewTabs->addTab(m_textureTab, "Texture");
   m_viewTabs->addTab(m_rsfTab, "RSF");
 
+  // Inspector tab — universal fallback viewer for unrecognised / binary files.
+  // Appended last so existing tab indices (Hex=0, Text=1, Texture=2, RSF=3) are unchanged.
+  {
+    m_inspectorTab = new QWidget();
+    auto* inspLayout = new QVBoxLayout(m_inspectorTab);
+    inspLayout->setContentsMargins(6, 6, 6, 6);
+    inspLayout->setSpacing(4);
+
+    auto* inspHeaderLabel = new QLabel(QStringLiteral("File Inspector"), m_inspectorTab);
+    QFont headerFont = inspHeaderLabel->font();
+    headerFont.setBold(true);
+    inspHeaderLabel->setFont(headerFont);
+    inspLayout->addWidget(inspHeaderLabel);
+
+    m_inspectorView = new QPlainTextEdit(m_inspectorTab);
+    m_inspectorView->setReadOnly(true);
+    m_inspectorView->setLineWrapMode(QPlainTextEdit::NoWrap);
+    {
+      // Qt6: use systemFont(FixedFont) to get the platform monospace font.
+      QFont mono = QFontDatabase::systemFont(QFontDatabase::FixedFont);
+      mono.setPointSize(9);
+      m_inspectorView->setFont(mono);
+    }
+    m_inspectorView->setPlaceholderText(QStringLiteral("Select a file entry to inspect."));
+    inspLayout->addWidget(m_inspectorView);
+
+    m_viewTabs->addTab(m_inspectorTab, "Inspector");
+  }
+
   // APT/DAT are not part of ASTra Core. Their legacy widgets may still be
   // constructed for now, but they must not remain as free-floating children of
   // the central viewer host when they are not added to m_viewTabs.
@@ -3819,8 +3928,12 @@ void MainWindow::onSaveAs() {
   const std::string srcPathStd = srcPath.toStdString();
   const std::string outPathStd = outPath.toStdString();
 
+  auto* saveAsDlg = new OperationStatusDialog(tr("Save As"), this);
+  saveAsDlg->setAttribute(Qt::WA_DeleteOnClose);
+  saveAsDlg->open();
+
   auto* watcher = new QFutureWatcher<SaveAsResult>(this);
-  connect(watcher, &QFutureWatcherBase::finished, this, [this, watcher, outPath]() {
+  connect(watcher, &QFutureWatcherBase::finished, this, [this, watcher, outPath, srcPath, saveAsDlg]() {
     const SaveAsResult result = watcher->result();
     watcher->deleteLater();
 
@@ -3830,7 +3943,13 @@ void MainWindow::onSaveAs() {
     if (!result.ok) {
       gf::core::logError(gf::core::LogCategory::FileIO,
                          "Save As write failed", result.error.toStdString());
-      showErrorDialog("Save As", "Write failed.", result.error, false);
+      OperationContext ctx;
+      ctx.operationType   = "Save As";
+      ctx.archivePath     = srcPath;
+      ctx.destinationPath = outPath;
+      ctx.stageReached    = "write";
+      ctx.errorText       = result.error;
+      if (saveAsDlg) saveAsDlg->setFailure(tr("Write failed."), ctx);
       return;
     }
 
@@ -3838,6 +3957,7 @@ void MainWindow::onSaveAs() {
                       "Save As succeeded", outPath.toStdString());
     toastOk(QString("Saved As %1").arg(QFileInfo(outPath).fileName()));
     statusBar()->showMessage(QString("Saved As → %1").arg(QDir::toNativeSeparators(outPath)), 4000);
+    if (saveAsDlg) saveAsDlg->setSuccess(outPath);
   });
 
   watcher->setFuture(QtConcurrent::run([editorSnapshot, srcPathStd, outPathStd]() -> SaveAsResult {
@@ -3922,8 +4042,12 @@ void MainWindow::onSave() {
   if (m_actRevert) m_actRevert->setEnabled(false);
   statusBar()->showMessage("Saving...");
 
+  auto* saveDlg = new OperationStatusDialog(tr("Save"), this);
+  saveDlg->setAttribute(Qt::WA_DeleteOnClose);
+  saveDlg->open();
+
   auto* watcher = new QFutureWatcher<SaveResult>(this);
-  connect(watcher, &QFutureWatcherBase::finished, this, [this, watcher]() {
+  connect(watcher, &QFutureWatcherBase::finished, this, [this, watcher, saveDlg, astPath]() {
     const SaveResult result = watcher->result();
     watcher->deleteLater();
 
@@ -3933,7 +4057,12 @@ void MainWindow::onSave() {
     if (!result.ok) {
       gf::core::logError(gf::core::LogCategory::FileIO,
                          "Save failed: write AST container", result.error.toStdString());
-      showErrorDialog("Save", "Failed to write AST container.", result.error, true);
+      OperationContext ctx;
+      ctx.operationType = "Save";
+      ctx.archivePath   = astPath;
+      ctx.stageReached  = "write";
+      ctx.errorText     = result.error;
+      if (saveDlg) saveDlg->setFailure(tr("Failed to write AST container."), ctx);
       return;
     }
 
@@ -3941,7 +4070,12 @@ void MainWindow::onSave() {
     if (!ok) {
       gf::core::logError(gf::core::LogCategory::FileIO,
                          "Save failed: could not save name cache");
-      showErrorDialog("Save", "Failed to save name cache.", QString(), true);
+      OperationContext ctx;
+      ctx.operationType = "Save";
+      ctx.archivePath   = astPath;
+      ctx.stageReached  = "name cache";
+      ctx.errorText     = tr("Name cache could not be persisted.");
+      if (saveDlg) saveDlg->setFailure(tr("Failed to save name cache."), ctx);
       return;
     }
     setDirty(false);
@@ -3954,10 +4088,36 @@ void MainWindow::onSave() {
       msg += QString(" AST backup created next to %1.").arg(QFileInfo(result.astPath).fileName());
     }
     statusBar()->showMessage(msg, 3500);
+    if (saveDlg) saveDlg->setSuccess(result.astPath);
   });
 
   watcher->setFuture(QtConcurrent::run([editorSnapshot, astPath]() mutable -> SaveResult {
     if (editorSnapshot && !astPath.isEmpty()) {
+      // Pre-save validation: rebuild to bytes, validate, then write.
+      std::string rebuildErr;
+      const auto builtBytes = editorSnapshot->rebuild(&rebuildErr);
+      if (builtBytes.empty() && !rebuildErr.empty()) {
+        gf::core::logError(gf::core::LogCategory::Validation,
+                           "Pre-save rebuild failed",
+                           rebuildErr + " | path=" + astPath.toStdString());
+        return {false, QString::fromStdString(rebuildErr), astPath};
+      }
+      if (!builtBytes.empty()) {
+        const auto valReport = gf::core::AstContainerEditor::validateWithReport(
+            std::span<const std::uint8_t>(builtBytes.data(), builtBytes.size()));
+        if (!valReport.ok) {
+          gf::core::logError(gf::core::LogCategory::Validation,
+                             "Pre-save AST validation failed — refusing to write",
+                             valReport.firstError + " | path=" + astPath.toStdString());
+          return {false,
+                  QString("AST validation failed before save:\n%1")
+                      .arg(QString::fromStdString(valReport.firstError)),
+                  astPath};
+        }
+        gf::core::logInfo(gf::core::LogCategory::Validation,
+                          "Pre-save AST validation passed",
+                          "size=" + std::to_string(builtBytes.size()) + " | path=" + astPath.toStdString());
+      }
       std::string err;
       if (!editorSnapshot->writeInPlace(&err, true)) {
         return {false, QString::fromStdString(err), astPath};
@@ -4019,46 +4179,53 @@ void MainWindow::exportCopyOf(const QString& sourcePath) {
   if (outPath.isEmpty()) return;
   outPath = ensureHasExtension(outPath, ext);
 
-  QFile in(sourcePath);
-  if (!in.open(QIODevice::ReadOnly)) {
-    gf::core::logError(gf::core::LogCategory::FileIO,
-                       "Export failed: cannot open source file for reading", sourcePath.toStdString());
-    showErrorDialog("Export Failed", "Failed to open source file for reading.", QString(), false);
-    return;
-  }
+  OperationContext ctx;
+  ctx.operationType   = "Export";
+  ctx.sourcePath      = sourcePath;
+  ctx.destinationPath = outPath;
 
-  constexpr qint64 kMaxExport = 1024ll * 1024ll * 1024ll; // 1 GiB safety cap
-  if (in.size() > kMaxExport) {
-    gf::core::logWarn(gf::core::LogCategory::FileIO,
-                      "Export refused: file exceeds 1 GiB safety cap", sourcePath.toStdString());
-    showErrorDialog("Export Failed", "Refusing to export: file is larger than the safety cap (1 GiB).", "If you need this, we can implement streaming export next.", false);
-    return;
-  }
+  runWithProgress(this, tr("Export"), [&]() -> OperationResult {
+    QFile in(sourcePath);
+    if (!in.open(QIODevice::ReadOnly)) {
+      ctx.stageReached = "open";
+      ctx.errorText    = tr("Cannot open source file for reading.");
+      gf::core::logError(gf::core::LogCategory::FileIO,
+                         "Export failed: cannot open source file for reading", sourcePath.toStdString());
+      return {false, tr("Failed to open source file for reading."), {}, ctx};
+    }
 
-  const QByteArray bytes = in.readAll();
-  in.close();
+    constexpr qint64 kMaxExport = 1024ll * 1024ll * 1024ll;
+    if (in.size() > kMaxExport) {
+      ctx.stageReached = "size check";
+      ctx.errorText    = tr("File exceeds 1 GiB safety cap.");
+      gf::core::logWarn(gf::core::LogCategory::FileIO,
+                        "Export refused: file exceeds 1 GiB safety cap", sourcePath.toStdString());
+      return {false, tr("Refusing to export: file is larger than the safety cap (1 GiB)."), {}, ctx};
+    }
 
-  const auto* bptr = reinterpret_cast<const std::byte*>(bytes.constData());
-  gf::core::SafeWriteOptions opt;
-  opt.make_backup = true; // If user overwrites an existing file, preserve it.
-  const auto r = gf::core::safe_write_bytes(outPath.toStdString(),
-                                            std::span<const std::byte>(bptr, static_cast<std::size_t>(bytes.size())),
-                                            opt);
-  if (!r.ok) {
-    gf::core::logError(gf::core::LogCategory::FileIO,
-                       "Export failed: write error", r.message + " -> " + outPath.toStdString());
-    showErrorDialog("Export Failed", "Export failed.", QString::fromStdString(r.message), false);
-    return;
-  }
+    ctx.stageReached = "read";
+    const QByteArray bytes = in.readAll();
+    in.close();
 
-  QString msg = "Exported successfully.";
-  if (r.backup_path) {
-    msg += QString("\nBackup created: %1").arg(QString::fromStdString(r.backup_path->string()));
-  }
-  gf::core::logInfo(gf::core::LogCategory::FileIO,
-                    "Export succeeded", outPath.toStdString());
-  toastOk(QString("Exported %1").arg(QFileInfo(outPath).fileName()));
-  showInfoDialog("Export", msg);
+    ctx.stageReached = "write";
+    const auto* bptr = reinterpret_cast<const std::byte*>(bytes.constData());
+    gf::core::SafeWriteOptions opt;
+    opt.make_backup = true;
+    const auto r = gf::core::safe_write_bytes(outPath.toStdString(),
+                                              std::span<const std::byte>(bptr, static_cast<std::size_t>(bytes.size())),
+                                              opt);
+    if (!r.ok) {
+      ctx.stageReached = "write";
+      ctx.errorText    = QString::fromStdString(r.message);
+      gf::core::logError(gf::core::LogCategory::FileIO,
+                         "Export failed: write error", r.message + " -> " + outPath.toStdString());
+      return {false, tr("Failed to write the output file."), {}, ctx};
+    }
+
+    gf::core::logInfo(gf::core::LogCategory::FileIO, "Export succeeded", outPath.toStdString());
+    toastOk(QString("Exported %1").arg(QFileInfo(outPath).fileName()));
+    return {true, {}, outPath};
+  });
 }
 
 
@@ -5741,6 +5908,23 @@ void MainWindow::onTreeContextMenu(const QPoint& pos) {
                         QString::fromStdString(rebuildErr), true);
         return;
       }
+      // Validate the rebuilt bytes before repacking.
+      if (!newNestedBytes.empty()) {
+        const auto valReport = gf::core::AstContainerEditor::validateWithReport(
+            std::span<const std::uint8_t>(newNestedBytes.data(), newNestedBytes.size()));
+        if (!valReport.ok) {
+          gf::core::logError(gf::core::LogCategory::Validation,
+                             "Nested AST rebuild failed post-validate — aborting repack",
+                             valReport.firstError);
+          showErrorDialog("Rebuild Validation Failed",
+                          "The rebuilt nested AST failed structural validation.",
+                          QString::fromStdString(valReport.firstError), true);
+          return;
+        }
+        gf::core::logInfo(gf::core::LogCategory::Validation,
+                          "Nested AST rebuild passed validation",
+                          "size=" + std::to_string(newNestedBytes.size()));
+      }
       const auto nestedSpan = std::span<const std::uint8_t>(
           newNestedBytes.data(), newNestedBytes.size());
       if (!outerEdOpt->replaceEntryBytes(nestedOuterIdx, nestedSpan,
@@ -5830,10 +6014,16 @@ void MainWindow::onTreeContextMenu(const QPoint& pos) {
       showViewerForItem(item);
     }
 
-    statusBar()->showMessage(validateTextureReplacement
-                                 ? "Replaced texture in memory. Use Save to write the AST and create a backup."
-                                 : "Replaced entry in memory. Use Save to write the AST and create a backup.",
-                             4500);
+    const QString replaceMsg = validateTextureReplacement
+        ? tr("Replaced texture in memory. Use Save to write the AST and create a backup.")
+        : tr("Replaced entry in memory. Use Save to write the AST and create a backup.");
+    statusBar()->showMessage(replaceMsg, 4500);
+
+    // Brief success confirmation so the user knows the operation completed.
+    const QString opLabel = validateTextureReplacement ? tr("Import Texture") : tr("Import");
+    runWithProgress(this, opLabel, [&]() -> OperationResult {
+        return {true, {}, {}};
+    });
   };
 
   QAction* chosen = menu.exec(m_tree->viewport()->mapToGlobal(pos));
@@ -5943,23 +6133,33 @@ void MainWindow::onTreeContextMenu(const QPoint& pos) {
       const QString outDir = chooseOutputDir();
       if (outDir.isEmpty()) return;
 
-      std::string err;
-      auto ed = gf::core::AstContainerEditor::load(path.toStdString(), &err);
-      if (!ed.has_value()) {
-        showErrorDialog("Extract Failed", "The AST container could not be loaded.", QString::fromStdString(err), false);
-        return;
-      }
+      const QString entryDisplayName = item ? item->text(0) : QString();
+      runWithProgress(this, tr("Extract"), [&]() -> OperationResult {
+        OperationContext ctx;
+        ctx.operationType = "Extract";
+        ctx.archivePath   = path;
+        ctx.entryName     = entryDisplayName;
+        ctx.destinationPath = outDir;
 
-      QStringList failures;
-      int okCount = exportEntry(item, *ed, outDir, &failures) ? 1 : 0;
-      if (!failures.isEmpty()) {
-        showErrorDialog("Extract Failed",
-                        "The selected entry could not be extracted.",
-                        failures.join("\n"),
-                        false);
-        return;
-      }
-      statusBar()->showMessage(QString("Extracted %1 item to %2").arg(okCount).arg(QDir::toNativeSeparators(outDir)), 3000);
+        std::string err;
+        auto ed = gf::core::AstContainerEditor::load(path.toStdString(), &err);
+        if (!ed.has_value()) {
+          ctx.stageReached = "load";
+          ctx.errorText    = QString::fromStdString(err);
+          return {false, tr("The AST container could not be loaded."), {}, ctx};
+        }
+
+        QStringList failures;
+        const int okCount = exportEntry(item, *ed, outDir, &failures) ? 1 : 0;
+        if (!failures.isEmpty()) {
+          ctx.stageReached = "extract";
+          ctx.errorText    = failures.join("\n");
+          return {false, tr("The selected entry could not be extracted."), {}, ctx};
+        }
+        statusBar()->showMessage(
+            QString("Extracted %1 item to %2").arg(okCount).arg(QDir::toNativeSeparators(outDir)), 3000);
+        return {true, {}, outDir};
+      });
       return;
     }
 
@@ -5971,34 +6171,38 @@ void MainWindow::onTreeContextMenu(const QPoint& pos) {
     const QString outDir = chooseOutputDir();
     if (outDir.isEmpty()) return;
 
-    QMap<QString, std::shared_ptr<gf::core::AstContainerEditor>> editors;
-    QStringList failures;
-    int okCount = 0;
+    runWithProgress(this, tr("Extract Folder"), [&]() -> OperationResult {
+      QMap<QString, std::shared_ptr<gf::core::AstContainerEditor>> editors;
+      QStringList failures;
+      int okCount = 0;
 
-    for (auto* sel : folderExtractable) {
-      const QString selPath = sel->data(0, Qt::UserRole).toString();
-      if (selPath.isEmpty()) continue;
-      if (!editors.contains(selPath)) {
-        std::string err;
-        auto loaded = gf::core::AstContainerEditor::load(selPath.toStdString(), &err);
-        if (!loaded.has_value()) {
-          failures.push_back(QString("%1 — %2").arg(QFileInfo(selPath).fileName(), QString::fromStdString(err)));
-          continue;
+      for (auto* sel : folderExtractable) {
+        const QString selPath = sel->data(0, Qt::UserRole).toString();
+        if (selPath.isEmpty()) continue;
+        if (!editors.contains(selPath)) {
+          std::string err;
+          auto loaded = gf::core::AstContainerEditor::load(selPath.toStdString(), &err);
+          if (!loaded.has_value()) {
+            failures.push_back(QString("%1 — %2").arg(QFileInfo(selPath).fileName(), QString::fromStdString(err)));
+            continue;
+          }
+          editors.insert(selPath, std::make_shared<gf::core::AstContainerEditor>(std::move(*loaded)));
         }
-        editors.insert(selPath, std::make_shared<gf::core::AstContainerEditor>(std::move(*loaded)));
+        auto editor = editors.value(selPath);
+        if (editor && exportEntry(sel, *editor, outDir, &failures)) ++okCount;
       }
-      auto editor = editors.value(selPath);
-      if (editor && exportEntry(sel, *editor, outDir, &failures)) ++okCount;
-    }
 
-    if (!failures.isEmpty()) {
-      showErrorDialog("Extract Folder",
-                      QString("Extracted %1 item(s), but some entries failed.").arg(okCount),
-                      failures.join("\n"),
-                      false);
-    } else {
-      showInfoDialog("Extract Folder", QString("Extracted %1 item(s) to:\n%2").arg(okCount).arg(QDir::toNativeSeparators(outDir)));
-    }
+      if (!failures.isEmpty()) {
+        OperationContext ctx;
+        ctx.operationType   = "Extract Folder";
+        ctx.destinationPath = outDir;
+        ctx.errorText       = failures.join("\n");
+        return {false,
+                QString(tr("Extracted %1 item(s), but some entries failed.")).arg(okCount),
+                {}, ctx};
+      }
+      return {true, {}, outDir};
+    });
     return;
   }
 
@@ -6006,34 +6210,38 @@ void MainWindow::onTreeContextMenu(const QPoint& pos) {
     const QString outDir = chooseOutputDir();
     if (outDir.isEmpty()) return;
 
-    QMap<QString, std::shared_ptr<gf::core::AstContainerEditor>> editors;
-    QStringList failures;
-    int okCount = 0;
+    runWithProgress(this, tr("Extract Selected"), [&]() -> OperationResult {
+      QMap<QString, std::shared_ptr<gf::core::AstContainerEditor>> editors;
+      QStringList failures;
+      int okCount = 0;
 
-    for (auto* sel : selectedExtractable) {
-      const QString selPath = sel->data(0, Qt::UserRole).toString();
-      if (selPath.isEmpty()) continue;
-      if (!editors.contains(selPath)) {
-        std::string err;
-        auto loaded = gf::core::AstContainerEditor::load(selPath.toStdString(), &err);
-        if (!loaded.has_value()) {
-          failures.push_back(QString("%1 — %2").arg(QFileInfo(selPath).fileName(), QString::fromStdString(err)));
-          continue;
+      for (auto* sel : selectedExtractable) {
+        const QString selPath = sel->data(0, Qt::UserRole).toString();
+        if (selPath.isEmpty()) continue;
+        if (!editors.contains(selPath)) {
+          std::string err;
+          auto loaded = gf::core::AstContainerEditor::load(selPath.toStdString(), &err);
+          if (!loaded.has_value()) {
+            failures.push_back(QString("%1 — %2").arg(QFileInfo(selPath).fileName(), QString::fromStdString(err)));
+            continue;
+          }
+          editors.insert(selPath, std::make_shared<gf::core::AstContainerEditor>(std::move(*loaded)));
         }
-        editors.insert(selPath, std::make_shared<gf::core::AstContainerEditor>(std::move(*loaded)));
+        auto editor = editors.value(selPath);
+        if (editor && exportEntry(sel, *editor, outDir, &failures)) ++okCount;
       }
-      auto editor = editors.value(selPath);
-      if (editor && exportEntry(sel, *editor, outDir, &failures)) ++okCount;
-    }
 
-    if (!failures.isEmpty()) {
-      showErrorDialog("Extract Selected",
-                      QString("Extracted %1 item(s), but some entries failed.").arg(okCount),
-                      failures.join("\n"),
-                      false);
-    } else {
-      showInfoDialog("Extract Selected", QString("Extracted %1 item(s) to:\n%2").arg(okCount).arg(QDir::toNativeSeparators(outDir)));
-    }
+      if (!failures.isEmpty()) {
+        OperationContext ctx;
+        ctx.operationType   = "Extract Selected";
+        ctx.destinationPath = outDir;
+        ctx.errorText       = failures.join("\n");
+        return {false,
+                QString(tr("Extracted %1 item(s), but some entries failed.")).arg(okCount),
+                {}, ctx};
+      }
+      return {true, {}, outDir};
+    });
     return;
   }
 
@@ -6041,10 +6249,19 @@ void MainWindow::onTreeContextMenu(const QPoint& pos) {
     const QString outDir = chooseOutputDir();
     if (outDir.isEmpty()) return;
 
-    std::string err;
-    auto ed = gf::core::AstContainerEditor::load(path.toStdString(), &err);
+    std::string loadErr;
+    auto ed = gf::core::AstContainerEditor::load(path.toStdString(), &loadErr);
     if (!ed.has_value()) {
-      showErrorDialog("Extract All Failed", "The AST container could not be loaded.", QString::fromStdString(err), false);
+      OperationContext ctx;
+      ctx.operationType = "Extract All";
+      ctx.archivePath   = path;
+      ctx.stageReached  = "load";
+      ctx.errorText     = QString::fromStdString(loadErr);
+      auto* dlg = new OperationStatusDialog(tr("Extract All"), this);
+      dlg->setAttribute(Qt::WA_DeleteOnClose);
+      dlg->open();
+      dlg->setFailure(tr("The AST container could not be loaded."), ctx);
+      dlg->exec();
       return;
     }
 
@@ -6126,13 +6343,21 @@ void MainWindow::onTreeContextMenu(const QPoint& pos) {
       ++okCount;
     }
 
+    auto* extractAllDlg = new OperationStatusDialog(tr("Extract All"), this);
+    extractAllDlg->setAttribute(Qt::WA_DeleteOnClose);
+    extractAllDlg->open();
     if (!failures.isEmpty()) {
-      showErrorDialog("Extract All",
-                      QString("Extracted %1 item(s), but some entries failed.").arg(okCount),
-                      failures.join("\n"),
-                      false);
+      OperationContext ctx;
+      ctx.operationType   = "Extract All";
+      ctx.archivePath     = path;
+      ctx.destinationPath = outDir;
+      ctx.errorText       = failures.join("\n");
+      extractAllDlg->setFailure(
+          QString(tr("Extracted %1 item(s), but some entries failed.")).arg(okCount), ctx);
+      extractAllDlg->exec();
     } else {
-      showInfoDialog("Extract All", QString("Extracted %1 item(s) to:\n%2").arg(okCount).arg(QDir::toNativeSeparators(outDir)));
+      extractAllDlg->setSuccess(outDir);
+      extractAllDlg->exec();
     }
     return;
   }
@@ -10560,6 +10785,96 @@ QString MainWindow::buildPreviewDiagnosticsText(const PreviewSelectionContext& c
   return lines.join('\n');
 }
 
+QString MainWindow::buildInspectorText(const PreviewSelectionContext& ctx) const {
+  QStringList lines;
+  lines << QStringLiteral("=== ASTra File Inspector ===");
+  lines << QString();
+
+  // Basic identity
+  lines << QStringLiteral("Name     : %1").arg(ctx.entryDisplayName.isEmpty() ? ctx.entryPath : ctx.entryDisplayName);
+  lines << QStringLiteral("Type hint: %1").arg(ctx.entryType.isEmpty() ? QStringLiteral("(none)") : ctx.entryType);
+
+  // Detection using central system
+  const QByteArray& rawBytes = ctx.rawBytes;
+  std::span<const std::uint8_t> hdrSpan;
+  std::vector<std::uint8_t> hdrBuf;
+  if (!rawBytes.isEmpty()) {
+    const std::size_t cap = std::min<std::size_t>(static_cast<std::size_t>(rawBytes.size()), 64u);
+    hdrBuf.assign(reinterpret_cast<const std::uint8_t*>(rawBytes.constData()),
+                  reinterpret_cast<const std::uint8_t*>(rawBytes.constData()) + cap);
+    hdrSpan = std::span<const std::uint8_t>(hdrBuf.data(), hdrBuf.size());
+  }
+  const std::string nameHint = ctx.entryDisplayName.toStdString();
+  const auto detection = gf::core::detectFileKind(hdrSpan, nameHint.empty()
+                                                     ? std::optional<std::string_view>{}
+                                                     : std::optional<std::string_view>{nameHint});
+  lines << QStringLiteral("Detected : %1 (confidence %2%)")
+               .arg(QString::fromStdString(std::string(gf::core::kindDisplayName(detection.kind))))
+               .arg(detection.confidence);
+  lines << QStringLiteral("Binary   : %1").arg(detection.isBinary ? QStringLiteral("yes") : QStringLiteral("no"));
+  lines << QStringLiteral("Reason   : %1").arg(QString::fromStdString(detection.reason));
+  lines << QStringLiteral("Viewer   : %1").arg(QString::fromStdString(detection.recommendedViewer));
+
+  // Sizes
+  const qulonglong storedSize = static_cast<qulonglong>(rawBytes.size());
+  const qulonglong inflatedSize = static_cast<qulonglong>(ctx.inflatedBytes.size());
+  lines << QString();
+  lines << QStringLiteral("Stored   : %1 bytes").arg(storedSize);
+  if (inflatedSize > 0 && inflatedSize != storedSize)
+    lines << QStringLiteral("Inflated : %1 bytes").arg(inflatedSize);
+
+  // Header bytes (magic)
+  if (!rawBytes.isEmpty()) {
+    const int magicLen = static_cast<int>(std::min(rawBytes.size(), qsizetype{16}));
+    QString hexMagic;
+    QString asciiMagic;
+    for (int i = 0; i < magicLen; ++i) {
+      const unsigned char c = static_cast<unsigned char>(rawBytes[i]);
+      hexMagic += QStringLiteral("%1 ").arg(c, 2, 16, QChar('0')).toUpper();
+      asciiMagic += (c >= 0x20 && c <= 0x7E) ? QChar(c) : QChar('.');
+    }
+    lines << QString();
+    lines << QStringLiteral("Magic    : %1 | %2").arg(hexMagic.trimmed(), asciiMagic);
+  }
+
+  // Printable strings scan
+  {
+    const QByteArray& scanSrc = ctx.inflatedBytes.isEmpty() ? rawBytes : ctx.inflatedBytes;
+    if (!scanSrc.isEmpty()) {
+      lines << QString();
+      lines << QStringLiteral("--- Strings (min 4 printable chars) ---");
+      QStringList found;
+      QString current;
+      const int scanLimit = static_cast<int>(std::min(scanSrc.size(), qsizetype{65536}));
+      for (int i = 0; i < scanLimit; ++i) {
+        const unsigned char c = static_cast<unsigned char>(scanSrc[i]);
+        if (c >= 0x20 && c <= 0x7E) {
+          current += QChar(c);
+        } else {
+          if (current.size() >= 4) found << current;
+          current.clear();
+        }
+      }
+      if (current.size() >= 4) found << current;
+      // Deduplicate and cap
+      found.removeDuplicates();
+      const int maxStrings = 80;
+      if (found.size() > maxStrings) {
+        found = found.mid(0, maxStrings);
+        found << QStringLiteral("… (truncated at %1 strings)").arg(maxStrings);
+      }
+      if (found.isEmpty()) lines << QStringLiteral("(no printable strings found)");
+      else {
+        for (const auto& s : found) lines << QStringLiteral("  \"%1\"").arg(s);
+      }
+    }
+  }
+
+  lines << QString();
+  lines << QStringLiteral("=== End of Inspector ===");
+  return lines.join('\n');
+}
+
 void MainWindow::showViewerForItem(QTreeWidgetItem* item) {
   if (!m_viewerLabel || !item) return;
 
@@ -10596,6 +10911,34 @@ void MainWindow::showViewerForItem(QTreeWidgetItem* item) {
                          (itemType.compare("APT1", Qt::CaseInsensitive) == 0) ||
                          (fi.suffix().compare("apt", Qt::CaseInsensitive) == 0) ||
                          (fi.suffix().compare("apt1", Qt::CaseInsensitive) == 0);
+
+  // Log routing decision using the central detection system.
+  {
+    const auto& rawCtxBytes = m_previewContext.rawBytes;
+    std::span<const std::uint8_t> headerSpan;
+    std::vector<std::uint8_t> headerBuf;
+    if (!rawCtxBytes.isEmpty()) {
+      const std::size_t cap = std::min<std::size_t>(static_cast<std::size_t>(rawCtxBytes.size()), 64u);
+      headerBuf.assign(reinterpret_cast<const std::uint8_t*>(rawCtxBytes.constData()),
+                       reinterpret_cast<const std::uint8_t*>(rawCtxBytes.constData()) + cap);
+      headerSpan = std::span<const std::uint8_t>(headerBuf.data(), headerBuf.size());
+    }
+    const std::string nameHint = item->text(0).toStdString();
+    const auto detection = gf::core::detectFileKind(headerSpan, nameHint);
+    gf::core::logInfo(gf::core::LogCategory::FileDetection,
+                      "Detected file kind for routing",
+                      "name=" + nameHint + " type_hint=" + itemType.toStdString() +
+                      " kind=" + std::string(gf::core::kindDisplayName(detection.kind)) +
+                      " confidence=" + std::to_string(detection.confidence) +
+                      " reason=" + detection.reason);
+    // Update status bar kind indicator
+    if (m_statusKindLabel) {
+      const QString kindStr = QString::fromStdString(std::string(gf::core::kindDisplayName(detection.kind)));
+      const QString confStr = QString::number(detection.confidence);
+      m_statusKindLabel->setText(QString("%1 (%2%)").arg(kindStr, confStr));
+      m_statusKindLabel->setVisible(true);
+    }
+  }
 
   // Use the unified loadAptForItem helper for all APT loading (embedded + standalone).
   if (isAptItem) {
@@ -10802,9 +11145,13 @@ void MainWindow::showViewerForItem(QTreeWidgetItem* item) {
 
     const bool rsfByExt = fi.suffix().compare("rsf", Qt::CaseInsensitive) == 0 || type.compare("RSF", Qt::CaseInsensitive) == 0;
     const bool rsfByHeader = isBinaryRsfBytes(rsfBytes);
+    // NOTE: rsfByXml alone MUST NOT activate the RSF tab.
+    // XML/text files that happen to start with '<' are NOT RSF files.
+    // Only binary RSF (RSF magic) or an explicit .rsf type hint routes to RSF.
+    // XML-format RSF state files are only handled here when rsfByExt is also true.
     const bool rsfByXml = isXmlLikeBytes(rsfBytes);
 
-    if (rsfByExt || rsfByHeader || rsfByXml) {
+    if (rsfByExt || rsfByHeader) {
       m_viewTabs->setCurrentWidget(m_rsfTab);
 
       if (rsfByHeader) {
@@ -11183,21 +11530,34 @@ if (wantsTexture) {
     }
   }
 
-	  // Auto-select best viewer.
+  // Auto-select best viewer.
   if (!hasTexture) {
     clearCurrentTextureState();
     if (m_textureInfo) m_textureInfo->setVisible(false);
+  }
+
+  // Always populate the Inspector tab with metadata for the current selection.
+  if (m_inspectorView) {
+    m_inspectorView->setPlainText(buildInspectorText(m_previewContext));
   }
 
   if (m_viewTabs) {
     if (hasDat)
       m_viewTabs->setCurrentWidget(m_datTab);
     else {
-      int idx = 0; // Hex
-      if (hasTexture) idx = 2;
-      else if (hasRsf) idx = 3;
-      else if (hasText) idx = 1;
-      m_viewTabs->setCurrentIndex(idx);
+      const bool anySpecific = hasTexture || hasRsf || hasText;
+      if (hasTexture) m_viewTabs->setCurrentIndex(2);
+      else if (hasRsf) m_viewTabs->setCurrentIndex(3);
+      else if (hasText) m_viewTabs->setCurrentIndex(1);
+      else if (!anySpecific && m_inspectorTab) {
+        // Nothing matched — route to Inspector so the file is still inspectable.
+        gf::core::logInfo(gf::core::LogCategory::Routing,
+                          "Unrecognised file — routing to Inspector tab",
+                          item->text(0).toStdString());
+        m_viewTabs->setCurrentWidget(m_inspectorTab);
+      } else {
+        m_viewTabs->setCurrentIndex(0); // Hex fallback
+      }
     }
   }
 }

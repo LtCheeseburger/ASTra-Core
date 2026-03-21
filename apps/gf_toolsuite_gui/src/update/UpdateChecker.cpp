@@ -9,30 +9,46 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
-#include <QRegularExpression>
 
 namespace gf::gui::update {
 
-// ── helpers ─────────────────────────────────────────────────────────────────
+// ── helpers ───────────────────────────────────────────────────────────────────
 
-// Strip leading "v" and any pre-release suffix like "-beta", "-rc1".
-// Returns a list of numeric components: "0.9.1" → {0, 9, 1}
-static QList<int> parseVersionComponents(const QString& raw) {
-    QString s = raw.trimmed();
-    if (s.startsWith('v') || s.startsWith('V'))
-        s = s.mid(1);
-    // Drop pre-release portion (everything after the first '-')
-    int dash = s.indexOf('-');
-    if (dash != -1)
-        s = s.left(dash);
-
-    QList<int> parts;
-    for (const QString& p : s.split('.'))
-        parts.append(p.toInt());
-    return parts;
+// Pick the best download asset from the asset list: prefer .zip first,
+// then .exe, then fall back to the first asset.
+static void selectAsset(const QJsonArray& assets,
+                         QString& outUrl,
+                         QString& outName) {
+    outUrl.clear();
+    outName.clear();
+    for (const QJsonValue& v : assets) {
+        const QJsonObject a = v.toObject();
+        const QString name  = a.value("name").toString();
+        if (name.endsWith(".zip", Qt::CaseInsensitive)) {
+            outUrl  = a.value("browser_download_url").toString();
+            outName = name;
+            return; // zip is preferred
+        }
+    }
+    // Second pass: .exe installer
+    for (const QJsonValue& v : assets) {
+        const QJsonObject a = v.toObject();
+        const QString name  = a.value("name").toString();
+        if (name.endsWith(".exe", Qt::CaseInsensitive)) {
+            outUrl  = a.value("browser_download_url").toString();
+            outName = name;
+            return;
+        }
+    }
+    // Fallback: first asset
+    if (!assets.isEmpty()) {
+        const QJsonObject first = assets.first().toObject();
+        outUrl  = first.value("browser_download_url").toString();
+        outName = first.value("name").toString();
+    }
 }
 
-// ── UpdateChecker ────────────────────────────────────────────────────────────
+// ── UpdateChecker ─────────────────────────────────────────────────────────────
 
 UpdateChecker::UpdateChecker(const QString& owner,
                              const QString& repo,
@@ -47,10 +63,12 @@ UpdateChecker::UpdateChecker(const QString& owner,
 }
 
 void UpdateChecker::checkForUpdates() {
-    gf::core::Log::get()->info("[Updater] Checking GitHub for updates");
+    gf::core::logInfo(gf::core::LogCategory::Update,
+                      "Checking GitHub Releases for updates");
 
+    // Fetch the most recent releases (up to 30) so we can filter by channel.
     const QString url = QStringLiteral(
-        "https://api.github.com/repos/%1/%2/releases/latest")
+        "https://api.github.com/repos/%1/%2/releases?per_page=30")
         .arg(m_owner, m_repo);
 
     QNetworkRequest req{QUrl(url)};
@@ -61,18 +79,10 @@ void UpdateChecker::checkForUpdates() {
 
 // static
 bool UpdateChecker::isNewer(const QString& localVersion,
-                            const QString& remoteTag) {
-    const auto local  = parseVersionComponents(localVersion);
-    const auto remote = parseVersionComponents(remoteTag);
-
-    const int len = qMax(local.size(), remote.size());
-    for (int i = 0; i < len; ++i) {
-        const int l = (i < local.size())  ? local[i]  : 0;
-        const int r = (i < remote.size()) ? remote[i] : 0;
-        if (r > l) return true;
-        if (r < l) return false;
-    }
-    return false; // identical
+                             const QString& remoteTag) {
+    const auto local  = gf::core::ParsedVersion::parse(localVersion.toStdString());
+    const auto remote = gf::core::ParsedVersion::parse(remoteTag.toStdString());
+    return remote > local;
 }
 
 void UpdateChecker::onReplyFinished(QNetworkReply* reply) {
@@ -80,7 +90,9 @@ void UpdateChecker::onReplyFinished(QNetworkReply* reply) {
 
     if (reply->error() != QNetworkReply::NoError) {
         const QString err = reply->errorString();
-        gf::core::Log::get()->warn("[Updater] Network error: {}", err.toStdString());
+        gf::core::logWarn(gf::core::LogCategory::Update,
+                          "Network error during update check",
+                          err.toStdString());
         emit checkFailed(err);
         return;
     }
@@ -88,61 +100,90 @@ void UpdateChecker::onReplyFinished(QNetworkReply* reply) {
     const QByteArray body = reply->readAll();
     QJsonParseError pe;
     const QJsonDocument doc = QJsonDocument::fromJson(body, &pe);
-    if (pe.error != QJsonParseError::NoError || !doc.isObject()) {
-        gf::core::Log::get()->warn("[Updater] Failed to parse GitHub response");
+    if (pe.error != QJsonParseError::NoError || !doc.isArray()) {
+        gf::core::logWarn(gf::core::LogCategory::Update,
+                          "Failed to parse GitHub releases response");
         emit checkFailed(tr("Failed to parse server response."));
         return;
     }
 
-    const QJsonObject obj = doc.object();
-    const QString tagName = obj.value("tag_name").toString();
-
-    if (tagName.isEmpty()) {
-        emit checkFailed(tr("No release tag found in response."));
-        return;
-    }
-
-    gf::core::Log::get()->info("[Updater] Latest version found: {}",
-                               tagName.toStdString());
-
-    // Pull the local version from the compiled-in constant.
-    const QString localVer = ASTRA_CURRENT_VERSION_QSTRING;
-
-    if (!isNewer(localVer, tagName)) {
-        gf::core::Log::get()->info("[Updater] Already running latest version");
+    const QJsonArray releases = doc.array();
+    if (releases.isEmpty()) {
+        gf::core::logInfo(gf::core::LogCategory::Update,
+                          "GitHub returned zero releases");
         emit upToDate();
         return;
     }
 
-    // Find a suitable download asset (prefer .zip, then first asset).
-    const QJsonArray assets = obj.value("assets").toArray();
-    QString downloadUrl;
-    QString assetName;
-    for (const QJsonValue& v : assets) {
-        const QJsonObject asset = v.toObject();
-        const QString name = asset.value("name").toString();
-        if (name.endsWith(".zip", Qt::CaseInsensitive) ||
-            name.endsWith(".exe", Qt::CaseInsensitive)) {
-            downloadUrl = asset.value("browser_download_url").toString();
-            assetName   = name;
-            break;
+    // Local version for comparison.
+    const QString localVerStr  = ASTRA_CURRENT_VERSION_QSTRING;
+    const auto    localVersion = gf::core::ParsedVersion::parse(localVerStr.toStdString());
+
+    gf::core::logInfo(gf::core::LogCategory::Update,
+                      "Scanning releases for channel",
+                      (m_channel == UpdateChannel::Stable  ? "Stable"
+                     : m_channel == UpdateChannel::Beta    ? "Beta"
+                     :                                       "Nightly"));
+
+    // Walk releases (GitHub returns them newest-first) and find the best
+    // candidate that is both eligible on the configured channel AND newer than
+    // the installed version.
+    ReleaseInfo bestCandidate;
+    bool        found = false;
+
+    for (const QJsonValue& val : releases) {
+        const QJsonObject obj = val.toObject();
+
+        // Skip drafts always.
+        if (obj.value("draft").toBool()) continue;
+
+        const QString tagName = obj.value("tag_name").toString();
+        if (tagName.isEmpty()) continue;
+
+        const bool ghPreRelease = obj.value("prerelease").toBool();
+        const auto parsed       = gf::core::ParsedVersion::parse(tagName.toStdString());
+
+        // Channel filter: pre-release classification must be within channel.
+        if (!releaseVisibleOnChannel(parsed.classification, m_channel)) {
+            gf::core::logInfo(gf::core::LogCategory::Update,
+                              "Skipping (channel filtered)",
+                              tagName.toStdString());
+            continue;
+        }
+
+        if (parsed > localVersion) {
+            // This is a newer, channel-eligible release.
+            gf::core::logInfo(gf::core::LogCategory::Update,
+                              "Update candidate found",
+                              tagName.toStdString());
+
+            ReleaseInfo info;
+            info.tagName      = tagName;
+            info.name         = obj.value("name").toString();
+            info.body         = obj.value("body").toString();
+            info.parsedVersion = parsed;
+            info.isDraft      = false;
+            info.isPreRelease = ghPreRelease;
+
+            selectAsset(obj.value("assets").toArray(),
+                        info.downloadUrl, info.assetName);
+
+            bestCandidate = std::move(info);
+            found = true;
+            break; // releases are newest-first; first match is the best
         }
     }
-    // If nothing matched, fall back to the first asset.
-    if (downloadUrl.isEmpty() && !assets.isEmpty()) {
-        const QJsonObject first = assets.first().toObject();
-        downloadUrl = first.value("browser_download_url").toString();
-        assetName   = first.value("name").toString();
+
+    if (found) {
+        gf::core::logInfo(gf::core::LogCategory::Update,
+                          "Update available",
+                          bestCandidate.tagName.toStdString());
+        emit updateAvailable(bestCandidate);
+    } else {
+        gf::core::logInfo(gf::core::LogCategory::Update,
+                          "Already running the latest eligible version");
+        emit upToDate();
     }
-
-    ReleaseInfo info;
-    info.tagName    = tagName;
-    info.name       = obj.value("name").toString();
-    info.body       = obj.value("body").toString();
-    info.downloadUrl = downloadUrl;
-    info.assetName  = assetName;
-
-    emit updateAvailable(info);
 }
 
 } // namespace gf::gui::update

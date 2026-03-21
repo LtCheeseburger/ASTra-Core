@@ -5,6 +5,8 @@ add_library(gf_core
   src/config.cpp
   src/features.cpp
   src/container_magic.cpp
+  src/file_detection.cpp
+  src/version_model.cpp
   src/AstRootResolver.cpp
   src/AstArchive.cpp
   src/AstContainerEditor.cpp

@@ -8,6 +8,10 @@
 
 class QEvent;
 class QStackedWidget;
+
+namespace gf::gui::update {
+class VersionBadgeWidget;
+}
 class QSplitter;
 class QTextBrowser;
 class QCheckBox;
@@ -44,6 +48,8 @@ private slots:
   void onItemDoubleClicked(QListWidgetItem* item);
   void onAbout();
   void onBetaTestingGuide();
+  void onCheckForUpdates();
+  void onStartupUpdateCheck();
 
 private:
   void buildUi();
@@ -109,6 +115,10 @@ private:
   // v0.6.2: optional scope toggle for text candidates
   QCheckBox* m_textScopeFullRoot = nullptr;
 
+
+  // Version badge (top-right of menu bar chrome)
+  gf::gui::update::VersionBadgeWidget* m_versionBadge = nullptr;
+  void triggerUpdateCheck(bool silent);
 
   // Active game context (selected in library)
   QString m_activeGameId;

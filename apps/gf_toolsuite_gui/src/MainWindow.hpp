@@ -43,6 +43,10 @@ class QGraphicsScene;
 class QCheckBox;
 class QTransform;
 
+namespace gf::gui::update {
+class VersionBadgeWidget;
+}
+
 namespace gf::gui::apt_editor {
 class AptPreviewScene;
 class AptSelectionManager;
@@ -94,6 +98,7 @@ private slots:
   void onShowCoreHelp();
   void onCheckForUpdates();
   void onExportLogs();
+  void onStartupUpdateCheck();
   void onSaveAs();
   void onRevert();
   void onAptApply();
@@ -392,6 +397,10 @@ private:
   QCheckBox*      m_datApplyTransformCheck = nullptr;
   std::optional<gf::dat::DatFile> m_currentDatFile;
 
+  // Inspector tab (universal fallback viewer — always appended last in m_viewTabs)
+  QWidget*        m_inspectorTab  = nullptr;
+  QPlainTextEdit* m_inspectorView = nullptr;
+
   QWidget* m_rsfTab = nullptr;
   QLabel* m_rsfNameValue = nullptr;
   QLabel* m_rsfModelCountValue = nullptr;
@@ -438,6 +447,7 @@ private:
   QLabel* m_statusDocLabel = nullptr;
   QLabel* m_statusEntryLabel = nullptr;
   QLabel* m_statusMetaLabel = nullptr;
+  QLabel* m_statusKindLabel = nullptr;  // detected file kind from central detection
   QLabel* m_statusDirtyLabel = nullptr;
 
   // Cached selection context (avoid depending on live QTreeWidgetItem*)
@@ -462,6 +472,13 @@ private:
   QAction* m_actUndoLastReplace = nullptr;
   QAction* m_actCheckForUpdates = nullptr;
   bool m_devMode = false;
+
+  // Version badge: top-right of the main toolbar.
+  gf::gui::update::VersionBadgeWidget* m_versionBadge = nullptr;
+
+  // Shared helper: creates an UpdateChecker, wires badge signals,
+  // and optionally wires the interactive update dialog.
+  void triggerUpdateCheck(bool silent);
 
   bool m_editingEnabled = false;
 
@@ -524,6 +541,9 @@ private:
     QString textDetectedType;
     QString textureDetectedType;
   };
+
+  // Inspector tab helpers
+  QString buildInspectorText(const PreviewSelectionContext& ctx) const;
 
   void invalidatePreviewContext();
   void applyTextureZoom();

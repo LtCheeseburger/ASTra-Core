@@ -35,6 +35,10 @@ enum class LogCategory {
   TexturePreview, // DDS decode for the preview pane
   Validation,     // archive / entry / DDS validation checks
   UI,             // Qt dialog / widget / event errors
+  FileDetection,  // magic/extension/content-sniff detection results
+  Routing,        // editor/viewer routing decisions
+  Update,         // auto-update check, download, and install events
+  Network,        // general network I/O (outside of update flows)
   Unknown         // catch-all for unclassified errors
 };
 

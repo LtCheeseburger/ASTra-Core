@@ -14,6 +14,11 @@
 #include "gf/core/scan.hpp"
 #include "gf/core/AstArchive.hpp"
 #include "gf_core/version.hpp"
+#include "update/UpdateChecker.hpp"
+#include "update/UpdateDialog.hpp"
+#include "update/UpdaterLauncher.hpp"
+#include "update/UpdaterConfig.hpp"
+#include "update/VersionBadgeWidget.hpp"
 
 #include <gf/core/AstRootResolver.hpp>
 
@@ -65,6 +70,8 @@
 #include <QSet>
 #include <QVBoxLayout>
 #include <QRegularExpression>
+#include <QTimer>
+#include <QFrame>
 
 namespace gf::gui {
 
@@ -430,6 +437,101 @@ GameSelectorWindow::GameSelectorWindow(QWidget* parent)
 
   buildUi();
   refresh();
+
+  QTimer::singleShot(4000, this, &GameSelectorWindow::onStartupUpdateCheck);
+}
+
+// ── Update check ──────────────────────────────────────────────────────────────
+
+void GameSelectorWindow::triggerUpdateCheck(bool silent) {
+    auto* checker = new gf::gui::update::UpdateChecker(
+        QStringLiteral(ASTRA_GITHUB_OWNER),
+        QStringLiteral(ASTRA_GITHUB_REPO),
+        this);
+
+    // Channel from QSettings (matches MainWindow's setting).
+    {
+        QSettings s(kSettingsOrg, kSettingsApp);
+        const int v = s.value(QStringLiteral("update/channel"), 0).toInt();
+        checker->setChannel(v == 1 ? gf::gui::update::UpdateChannel::Beta
+                          : v == 2 ? gf::gui::update::UpdateChannel::Nightly
+                          :          gf::gui::update::UpdateChannel::Stable);
+    }
+
+    if (m_versionBadge)
+        m_versionBadge->setStatusChecking();
+
+    // Always update the badge.
+    connect(checker, &gf::gui::update::UpdateChecker::updateAvailable,
+            this, [this](const gf::gui::update::ReleaseInfo& info) {
+        if (m_versionBadge) m_versionBadge->setStatusUpdateAvailable(info);
+    });
+    connect(checker, &gf::gui::update::UpdateChecker::upToDate,
+            this, [this]() {
+        if (m_versionBadge) m_versionBadge->setStatusLatest();
+    });
+    connect(checker, &gf::gui::update::UpdateChecker::checkFailed,
+            this, [this](const QString& reason) {
+        if (m_versionBadge) m_versionBadge->setStatusError(reason);
+    });
+
+    if (!silent) {
+        connect(checker, &gf::gui::update::UpdateChecker::updateAvailable,
+                this, [this, checker](const gf::gui::update::ReleaseInfo& info) {
+            checker->deleteLater();
+
+            auto* dlg = new gf::gui::update::UpdateDialog(info, this);
+            dlg->setAttribute(Qt::WA_DeleteOnClose);
+
+            connect(dlg, &gf::gui::update::UpdateDialog::updateRequested,
+                    this, [this](const gf::gui::update::ReleaseInfo& releaseInfo) {
+                auto* launcher = new gf::gui::update::UpdaterLauncher(this, this);
+                connect(launcher, &gf::gui::update::UpdaterLauncher::updateReadyToInstall,
+                        this, []() { QApplication::quit(); });
+                connect(launcher, &gf::gui::update::UpdaterLauncher::downloadFailed,
+                        this, [this, launcher](const QString& reason) {
+                    QMessageBox::critical(this, tr("Update Failed"),
+                        tr("The update could not be downloaded or applied:\n\n%1").arg(reason));
+                    launcher->deleteLater();
+                });
+                launcher->startUpdate(releaseInfo);
+            });
+
+            dlg->exec();
+        });
+
+        connect(checker, &gf::gui::update::UpdateChecker::upToDate,
+                this, [this, checker]() {
+            checker->deleteLater();
+            auto* dlg = new gf::gui::update::UpToDateDialog(this);
+            dlg->setAttribute(Qt::WA_DeleteOnClose);
+            dlg->exec();
+        });
+
+        connect(checker, &gf::gui::update::UpdateChecker::checkFailed,
+                this, [this, checker](const QString& errorMessage) {
+            checker->deleteLater();
+            QMessageBox::warning(this, tr("Update Check Failed"),
+                tr("Could not check for updates:\n\n%1").arg(errorMessage));
+        });
+    } else {
+        connect(checker, &gf::gui::update::UpdateChecker::updateAvailable,
+                checker, &QObject::deleteLater);
+        connect(checker, &gf::gui::update::UpdateChecker::upToDate,
+                checker, &QObject::deleteLater);
+        connect(checker, &gf::gui::update::UpdateChecker::checkFailed,
+                checker, &QObject::deleteLater);
+    }
+
+    checker->checkForUpdates();
+}
+
+void GameSelectorWindow::onStartupUpdateCheck() {
+    triggerUpdateCheck(/*silent=*/true);
+}
+
+void GameSelectorWindow::onCheckForUpdates() {
+    triggerUpdateCheck(/*silent=*/false);
 }
 
 void GameSelectorWindow::buildUi() {
@@ -487,6 +589,17 @@ void GameSelectorWindow::buildUi() {
   connect(about, &QAction::triggered, this, &GameSelectorWindow::onAbout);
   helpMenu->addAction(about);
 
+  helpMenu->addSeparator();
+  auto* actCheckUpdates = helpMenu->addAction("Check for Updates\u2026");
+  connect(actCheckUpdates, &QAction::triggered,
+          this, &GameSelectorWindow::onCheckForUpdates);
+
+  // Version badge — created here; inserted into controls row below.
+  m_versionBadge = new gf::gui::update::VersionBadgeWidget(
+      ASTRA_CURRENT_VERSION_QSTRING, this);
+  connect(m_versionBadge, &gf::gui::update::VersionBadgeWidget::clicked,
+          this, &GameSelectorWindow::onCheckForUpdates);
+
   // v0.7.1: view/sort/filter controls for larger libraries.
   auto* controls = new QHBoxLayout();
   controls->setContentsMargins(0, 0, 0, 0);
@@ -515,6 +628,13 @@ void GameSelectorWindow::buildUi() {
   m_search = new QLineEdit(central);
   m_search->setPlaceholderText("Search title, platform, year...");
   controls->addWidget(m_search, 1);
+
+  // Version badge — right-aligned in the controls row so it's fully visible.
+  auto* badgeSep = new QFrame(central);
+  badgeSep->setFrameShape(QFrame::VLine);
+  badgeSep->setFrameShadow(QFrame::Sunken);
+  controls->addWidget(badgeSep);
+  controls->addWidget(m_versionBadge);
 
   outer->addLayout(controls);
 

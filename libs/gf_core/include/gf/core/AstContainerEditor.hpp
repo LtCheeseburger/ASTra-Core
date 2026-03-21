@@ -103,6 +103,18 @@ bool replaceEntryBytes(std::uint32_t entryIndex,
   // on the first detected problem.  Does NOT load or decompress entry payloads.
   static bool validate(std::span<const std::uint8_t> data, std::string* err = nullptr);
 
+  // Structured validation result — preferred for callers that need to log or
+  // surface issues rather than just pass/fail.
+  struct AstValidationReport {
+    bool ok = false;
+    std::string firstError;           // empty when ok == true
+    std::vector<std::string> warnings; // non-fatal issues (currently reserved)
+  };
+
+  // Wraps validate() and returns a structured report.  Equivalent semantics:
+  // ok == false means the data should NOT be written to disk as-is.
+  static AstValidationReport validateWithReport(std::span<const std::uint8_t> data);
+
 private:
   std::filesystem::path m_path;
   Header m_header{};
