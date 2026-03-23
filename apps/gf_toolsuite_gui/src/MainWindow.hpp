@@ -1,12 +1,15 @@
 #pragma once
 #include <QMainWindow>
 #include "DocumentLifecycle.hpp"
+#include "ModProfileManager.hpp"
+#include "ProfileContextService.hpp"
 #include <QHash>
 #include <QSet>
 #include "NameCache.hpp"
 #include <QVector>
 #include <QPoint>
 #include <optional>
+#include <memory>
 
 #include "AstIndexer.hpp"
 #include <gf/models/rsf.hpp>
@@ -45,6 +48,10 @@ class QTransform;
 
 namespace gf::gui::update {
 class VersionBadgeWidget;
+}
+
+namespace gf::gui {
+class ActiveProfileWidget;
 }
 
 namespace gf::gui::apt_editor {
@@ -99,6 +106,7 @@ private slots:
   void onCheckForUpdates();
   void onExportLogs();
   void onStartupUpdateCheck();
+  void onManageProfiles();
   void onSaveAs();
   void onRevert();
   void onAptApply();
@@ -559,6 +567,11 @@ private:
   quint64 m_previewSelectionVersion = 0;
   PreviewSelectionContext m_previewContext;
   quint64 m_currentTextureSelectionVersion = 0;
+
+  // ── Mod Profile system (Phase 1) ─────────────────────────────────────────
+  std::unique_ptr<ModProfileManager>   m_profileManager;
+  std::unique_ptr<ProfileContextService> m_profileContext;
+  ActiveProfileWidget*                 m_activeProfileWidget = nullptr;
 };
 
 } // namespace gf::gui

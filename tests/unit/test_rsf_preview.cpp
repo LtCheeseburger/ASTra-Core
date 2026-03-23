@@ -1,4 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/catch_approx.hpp>
+
+using Catch::Approx;
 
 #include <gf/models/rsf.hpp>
 #include <gf/models/rsf_preview.hpp>

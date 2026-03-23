@@ -29,6 +29,8 @@ constexpr std::uint32_t DDPF_FOURCC      = 0x4;
 
 constexpr std::uint32_t FOURCC_DXT1      = 0x31545844u; // "DXT1"
 constexpr std::uint32_t FOURCC_DXT5      = 0x35545844u; // "DXT5"
+constexpr std::uint32_t FOURCC_ATI1      = 0x31495441u; // "ATI1" (BC4)
+constexpr std::uint32_t FOURCC_ATI2      = 0x32495441u; // "ATI2" (BC5)
 
 static void write_u32le(std::uint8_t* p, std::uint32_t v) {
     p[0] = static_cast<std::uint8_t>(v & 0xFF);
@@ -62,8 +64,11 @@ static std::vector<std::uint8_t> make_dds_header(std::uint32_t width,
     write_u32le(p + 16, width);
 
     // pitchOrLinearSize — size of the top mip level in bytes
-    const std::size_t top_size = dxt_compressed_size(width, height,
-        fmt == DdsBuildFormat::DXT1 ? DxtEncodeFormat::DXT1 : DxtEncodeFormat::DXT5);
+    const DxtEncodeFormat encFmt =
+        (fmt == DdsBuildFormat::DXT1 || fmt == DdsBuildFormat::BC4)
+            ? DxtEncodeFormat::DXT1  // 8 bytes/block
+            : DxtEncodeFormat::DXT5; // 16 bytes/block
+    const std::size_t top_size = dxt_compressed_size(width, height, encFmt);
     write_u32le(p + 20, static_cast<std::uint32_t>(top_size));
 
     // depth = 0, mipMapCount
@@ -75,7 +80,15 @@ static std::vector<std::uint8_t> make_dds_header(std::uint32_t width,
     std::uint8_t* pf = p + 76;
     write_u32le(pf +  0, 32);          // dwSize
     write_u32le(pf +  4, DDPF_FOURCC); // dwFlags
-    write_u32le(pf +  8, fmt == DdsBuildFormat::DXT1 ? FOURCC_DXT1 : FOURCC_DXT5);
+    std::uint32_t fourcc;
+    switch (fmt) {
+    case DdsBuildFormat::DXT1: fourcc = FOURCC_DXT1; break;
+    case DdsBuildFormat::DXT5: fourcc = FOURCC_DXT5; break;
+    case DdsBuildFormat::BC4:  fourcc = FOURCC_ATI1; break;
+    case DdsBuildFormat::BC5:  fourcc = FOURCC_ATI2; break;
+    default:                   fourcc = FOURCC_DXT1; break;
+    }
+    write_u32le(pf +  8, fourcc);
     // RGBBitCount, masks — 0 for compressed
 
     // DDSCAPS at offset 108
@@ -183,8 +196,13 @@ std::vector<std::uint8_t> build_dds_from_rgba(std::span<const std::uint8_t> rgba
     }
     mips = std::max(1u, mips);
 
-    const DxtEncodeFormat enc_fmt =
-        (params.format == DdsBuildFormat::DXT5) ? DxtEncodeFormat::DXT5 : DxtEncodeFormat::DXT1;
+    DxtEncodeFormat enc_fmt;
+    switch (params.format) {
+    case DdsBuildFormat::DXT5: enc_fmt = DxtEncodeFormat::DXT5; break;
+    case DdsBuildFormat::BC4:  enc_fmt = DxtEncodeFormat::BC4;  break;
+    case DdsBuildFormat::BC5:  enc_fmt = DxtEncodeFormat::BC5;  break;
+    default:                   enc_fmt = DxtEncodeFormat::DXT1; break;
+    }
 
     // Scale source to target dimensions if needed
     std::vector<std::uint8_t> mip0;

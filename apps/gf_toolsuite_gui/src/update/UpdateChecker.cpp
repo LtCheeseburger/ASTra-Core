@@ -125,11 +125,20 @@ void UpdateChecker::onReplyFinished(QNetworkReply* reply) {
                      : m_channel == UpdateChannel::Beta    ? "Beta"
                      :                                       "Nightly"));
 
-    // Walk releases (GitHub returns them newest-first) and find the best
-    // candidate that is both eligible on the configured channel AND newer than
-    // the installed version.
-    ReleaseInfo bestCandidate;
-    bool        found = false;
+    // Walk releases (GitHub returns them newest-first).
+    // We track two things separately:
+    //   latestEligible  — the newest channel-eligible release (first one found)
+    //   newerCandidate  — the first channel-eligible release that is > localVersion
+    //
+    // This lets us distinguish three outcomes:
+    //   local < latest  → updateAvailable
+    //   local == latest → upToDate
+    //   local > latest  → localAhead (pre-release / dev build)
+
+    ReleaseInfo latestEligible;
+    bool        foundLatest = false;
+    ReleaseInfo newerCandidate;
+    bool        foundNewer  = false;
 
     for (const QJsonValue& val : releases) {
         const QJsonObject obj = val.toObject();
@@ -151,34 +160,49 @@ void UpdateChecker::onReplyFinished(QNetworkReply* reply) {
             continue;
         }
 
-        if (parsed > localVersion) {
-            // This is a newer, channel-eligible release.
+        // First channel-eligible release = the latest on this channel.
+        if (!foundLatest) {
+            foundLatest = true;
+            latestEligible.tagName       = tagName;
+            latestEligible.name          = obj.value("name").toString();
+            latestEligible.body          = obj.value("body").toString();
+            latestEligible.parsedVersion = parsed;
+            latestEligible.isDraft       = false;
+            latestEligible.isPreRelease  = ghPreRelease;
+            selectAsset(obj.value("assets").toArray(),
+                        latestEligible.downloadUrl, latestEligible.assetName);
+        }
+
+        if (!foundNewer && parsed > localVersion) {
             gf::core::logInfo(gf::core::LogCategory::Update,
                               "Update candidate found",
                               tagName.toStdString());
-
-            ReleaseInfo info;
-            info.tagName      = tagName;
-            info.name         = obj.value("name").toString();
-            info.body         = obj.value("body").toString();
-            info.parsedVersion = parsed;
-            info.isDraft      = false;
-            info.isPreRelease = ghPreRelease;
-
+            newerCandidate = latestEligible; // already filled above (same or earlier iteration)
+            // If newerCandidate hasn't been filled yet (shouldn't happen since
+            // releases are newest-first, so this IS latestEligible), copy explicitly.
+            newerCandidate.tagName       = tagName;
+            newerCandidate.name          = obj.value("name").toString();
+            newerCandidate.body          = obj.value("body").toString();
+            newerCandidate.parsedVersion = parsed;
+            newerCandidate.isDraft       = false;
+            newerCandidate.isPreRelease  = ghPreRelease;
             selectAsset(obj.value("assets").toArray(),
-                        info.downloadUrl, info.assetName);
-
-            bestCandidate = std::move(info);
-            found = true;
-            break; // releases are newest-first; first match is the best
+                        newerCandidate.downloadUrl, newerCandidate.assetName);
+            foundNewer = true;
+            break; // releases are newest-first; first match is the best candidate
         }
     }
 
-    if (found) {
+    if (foundNewer) {
         gf::core::logInfo(gf::core::LogCategory::Update,
                           "Update available",
-                          bestCandidate.tagName.toStdString());
-        emit updateAvailable(bestCandidate);
+                          newerCandidate.tagName.toStdString());
+        emit updateAvailable(newerCandidate);
+    } else if (foundLatest && localVersion > latestEligible.parsedVersion) {
+        gf::core::logInfo(gf::core::LogCategory::Update,
+                          "Local version is ahead of latest release (pre-release build)",
+                          localVerStr.toStdString() + " > " + latestEligible.tagName.toStdString());
+        emit localAhead(latestEligible);
     } else {
         gf::core::logInfo(gf::core::LogCategory::Update,
                           "Already running the latest eligible version");

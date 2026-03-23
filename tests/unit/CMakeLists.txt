@@ -11,6 +11,7 @@ add_executable(gf_tests
   test_apt_display_list.cpp
   test_rsf_preview.cpp
   test_dds_validate.cpp
+  test_texture_replace.cpp
 )
 
 target_link_libraries(gf_tests PRIVATE

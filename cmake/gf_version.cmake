@@ -1,7 +1,7 @@
 # Central versioning: SemVer + optional build metadata
 set(GF_VERSION_MAJOR 1)
 set(GF_VERSION_MINOR 0)
-set(GF_VERSION_PATCH 1)
+set(GF_VERSION_PATCH 8)
 set(GF_VERSION_REV 0)
 
 set(GF_VERSION_STRING "v${GF_VERSION_MAJOR}.${GF_VERSION_MINOR}.${GF_VERSION_PATCH}")

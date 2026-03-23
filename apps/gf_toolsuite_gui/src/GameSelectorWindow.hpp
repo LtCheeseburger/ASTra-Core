@@ -9,6 +9,10 @@
 class QEvent;
 class QStackedWidget;
 
+namespace gf::gui {
+class ModProfileManager;
+}
+
 namespace gf::gui::update {
 class VersionBadgeWidget;
 }
@@ -46,6 +50,16 @@ private slots:
   void onOpenAstEditor();
   void onSelectionChanged();
   void onItemDoubleClicked(QListWidgetItem* item);
+  void onManageProfiles();
+  void onInstallMod();
+  void onShowInstalledMods();
+  void onConfigureRuntime();
+  void onCreateBaseline();
+  void onExportPackage();
+  void onEditPackageMetadata();
+  void onApplyProfile();
+  void onApplyAndLaunch();
+  void onLaunch();
   void onAbout();
   void onBetaTestingGuide();
   void onCheckForUpdates();
@@ -81,6 +95,22 @@ private:
   QPushButton* m_btnAddGame = nullptr;
   QPushButton* m_btnRemoveGame = nullptr;
   QPushButton* m_btnOpenGameFiles = nullptr;
+
+  // Selected-game / mod-profile panel (below the list)
+  class QFrame* m_profilePanel    = nullptr;
+  QLabel*       m_ppGameLabel     = nullptr;   // current game name
+  QLabel*       m_ppProfileLabel  = nullptr;   // active profile status
+  QPushButton*  m_ppManageBtn          = nullptr;   // "Manage Profiles…"
+  QPushButton*  m_ppInstallBtn         = nullptr;   // "Install Mod…"
+  QPushButton*  m_ppBrowseBtn          = nullptr;   // "Installed Mods…"
+  QPushButton*  m_ppConfigureRuntimeBtn  = nullptr;  // "Configure Runtime…"
+  QPushButton*  m_ppCreateBaselineBtn   = nullptr;  // "Create Baseline…"
+  QPushButton*  m_ppExportBtn           = nullptr;  // "Export Package…"
+  QPushButton*  m_ppEditMetadataBtn     = nullptr;  // "Edit Package Metadata…"
+  QPushButton*  m_ppApplyBtn            = nullptr;  // "Apply Profile"
+  QPushButton*  m_ppApplyLaunchBtn      = nullptr;  // "Apply & Launch"
+  QPushButton*  m_ppLaunchBtn           = nullptr;  // "Launch"
+  QLabel*       m_ppDeployStatusLabel   = nullptr;  // Deployment status indicator
 
   // v0.5.2: Tool hub / modules
   QListWidget* m_modules = nullptr;
@@ -119,6 +149,9 @@ private:
   // Version badge (top-right of menu bar chrome)
   gf::gui::update::VersionBadgeWidget* m_versionBadge = nullptr;
   void triggerUpdateCheck(bool silent);
+
+  // Mod profile manager (game library context)
+  ModProfileManager* m_profileManager = nullptr;
 
   // Active game context (selected in library)
   QString m_activeGameId;

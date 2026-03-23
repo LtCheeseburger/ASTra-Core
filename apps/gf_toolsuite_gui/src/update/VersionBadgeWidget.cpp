@@ -10,12 +10,13 @@
 namespace gf::gui::update {
 
 // Pill colours (background hex strings).
-static constexpr const char* kColourChecking = "#888888";
-static constexpr const char* kColourLatest   = "#27ae60";
-static constexpr const char* kColourUpdate   = "#e67e22";
-static constexpr const char* kColourBeta     = "#2980b9";
-static constexpr const char* kColourNightly  = "#7f8c8d";
-static constexpr const char* kColourError    = "#c0392b";
+static constexpr const char* kColourChecking   = "#888888";
+static constexpr const char* kColourLatest     = "#27ae60";
+static constexpr const char* kColourUpdate     = "#e67e22";
+static constexpr const char* kColourBeta       = "#2980b9";
+static constexpr const char* kColourNightly    = "#7f8c8d";
+static constexpr const char* kColourPreRelease = "#8e44ad"; // purple — ahead of latest
+static constexpr const char* kColourError      = "#c0392b";
 
 // Pill label stylesheet template.
 static QString pillStyle(const QString& bg) {
@@ -102,6 +103,22 @@ void VersionBadgeWidget::setStatusUpdateAvailable(const ReleaseInfo& info) {
         .arg(tr("Installed")).arg(m_currentVersion)
         .arg(tr("Available")).arg(info.tagName)
         .arg(tr("Click to view and install the update.")));
+}
+
+void VersionBadgeWidget::setStatusPreReleaseBuild(const ReleaseInfo& latestRelease) {
+    m_status = BadgeStatus::PreReleaseBuild;
+    m_latestTag = latestRelease.tagName;
+    applyPillStyle(tr("Pre-release Build"), kColourPreRelease);
+    setToolTip(QStringLiteral(
+        "%1\n\n"
+        "%2: %3\n"
+        "%4: %5\n\n"
+        "%6")
+        .arg(tr("This build is ahead of the latest public release."))
+        .arg(tr("Installed")).arg(m_currentVersion)
+        .arg(tr("Latest release")).arg(latestRelease.tagName.isEmpty()
+                                           ? tr("(none)") : latestRelease.tagName)
+        .arg(tr("Click to view the latest release.")));
 }
 
 void VersionBadgeWidget::setStatusError(const QString& reason) {

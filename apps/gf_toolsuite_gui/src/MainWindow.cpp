@@ -1,4 +1,6 @@
 #include "MainWindow.hpp"
+#include "ModProfilesDialog.hpp"
+#include "ActiveProfileWidget.hpp"
 #include "CreateRsfAstDialog.hpp"
 #include "update/UpdateChecker.hpp"
 #include "update/UpdateDialog.hpp"
@@ -1641,6 +1643,18 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     m_editingEnabled = true;
   }
 
+  // Mod profile system — initialise before buildUi() so the status bar widget
+  // can be created with a live context service.
+  m_profileManager = std::make_unique<ModProfileManager>(this);
+  {
+    QString err;
+    if (!m_profileManager->load(&err)) {
+      gf::core::logWarn(gf::core::LogCategory::General,
+                        "MainWindow: failed to load mod profiles index", err.toStdString());
+    }
+  }
+  m_profileContext = std::make_unique<ProfileContextService>(m_profileManager.get(), this);
+
   buildUi();
 
   // Non-blocking startup update check — fires 4 s after the window is ready
@@ -2135,6 +2149,19 @@ void MainWindow::openGame(const QString& displayName,
 
   m_cacheId = cacheIdFromSeed(rootPath);
   m_nameCache.loadForGame(m_cacheId);
+
+  // Reload profile index to pick up any changes made in the game selector.
+  if (m_profileManager) {
+    QString profileErr;
+    m_profileManager->load(&profileErr);
+  }
+
+  // Update profile context so the status bar widget and any connected subsystems
+  // reflect the newly active game.
+  if (m_profileContext) {
+    m_profileContext->setActiveGame(m_cacheId, displayName);
+  }
+
   m_doc.path.clear();
   m_liveAstEditor.reset();
   m_liveAstPath.clear();
@@ -2251,6 +2278,11 @@ void MainWindow::triggerUpdateCheck(bool silent) {
         if (m_versionBadge)
             m_versionBadge->setStatusLatest();
     });
+    connect(checker, &gf::gui::update::UpdateChecker::localAhead,
+            this, [this](const gf::gui::update::ReleaseInfo& latestRelease) {
+        if (m_versionBadge)
+            m_versionBadge->setStatusPreReleaseBuild(latestRelease);
+    });
     connect(checker, &gf::gui::update::UpdateChecker::checkFailed,
             this, [this](const QString& reason) {
         if (m_versionBadge)
@@ -2332,6 +2364,28 @@ void MainWindow::onStartupUpdateCheck() {
 
 void MainWindow::onCheckForUpdates() {
     triggerUpdateCheck(/*silent=*/false);
+}
+
+void MainWindow::onManageProfiles() {
+    if (!m_profileContext || !m_profileContext->hasActiveGame()) {
+        QMessageBox::information(
+            this,
+            "Mod Profiles",
+            "Open a game first to manage mod profiles.\n\n"
+            "Select a game from the Game Selector window, then use "
+            "Tools \u2192 Manage Mod Profiles.");
+        return;
+    }
+
+    auto* dlg = new ModProfilesDialog(
+        m_profileManager.get(),
+        m_profileContext->activeGameId(),
+        m_profileContext->activeGameDisplayName(),
+        this);
+    dlg->setAttribute(Qt::WA_DeleteOnClose);
+    dlg->show();
+    dlg->raise();
+    dlg->activateWindow();
 }
 
 void MainWindow::buildUi() {
@@ -2465,6 +2519,15 @@ void MainWindow::buildUi() {
   m_editModeLabel->setText("Editing: ON");
   m_editModeLabel->setToolTip("Read-only by default. Enable Editing to allow replace/save actions.");
   statusBar()->addPermanentWidget(m_editModeLabel);
+
+  // Active profile indicator
+  auto* sep5 = new QLabel(" | ", this);
+  statusBar()->addPermanentWidget(sep5);
+
+  m_activeProfileWidget = new ActiveProfileWidget(m_profileContext.get(), this);
+  statusBar()->addPermanentWidget(m_activeProfileWidget);
+  connect(m_activeProfileWidget, &ActiveProfileWidget::manageProfilesRequested,
+          this, &MainWindow::onManageProfiles);
 
   // Progress indicator (top-right)
   m_parseProgress = new QProgressBar(this);
@@ -5847,23 +5910,33 @@ void MainWindow::onTreeContextMenu(const QPoint& pos) {
       // Run the full pipeline.
       gf::core::logBreadcrumb(gf::core::LogCategory::TextureReplace, "running replace_texture pipeline");
       std::string pipelineErr;
+      gf::textures::TextureReplaceReport texReport;
       auto replaceResult = gf::textures::replace_texture(
-          origSpan, importSpan, importFmt, astFlags, &pipelineErr);
+          origSpan, importSpan, importFmt, astFlags, &pipelineErr, &texReport);
 
       if (!replaceResult || replaceResult->containerBytes.empty()) {
+        // Log structured diagnostics before showing the error dialog.
+        const std::string diagDetail = texReport.detailReason.empty() ? pipelineErr : texReport.detailReason;
         gf::core::logError(gf::core::LogCategory::TextureReplace,
-                           "Pipeline failed: replace_texture returned empty result",
-                           pipelineErr + " | entry=" + item->text(0).toStdString());
+                           "Pipeline failed: " + (texReport.shortReason.empty() ? std::string("replace_texture returned empty result") : texReport.shortReason),
+                           diagDetail + " | origFmt=" + texReport.origFormatName
+                           + " | entry=" + item->text(0).toStdString());
         showErrorDialog("Replace Texture Failed",
-                        "The texture replacement pipeline could not produce a valid container.",
-                        QString::fromStdString(pipelineErr), false);
+                        texReport.shortReason.empty()
+                            ? "The texture replacement pipeline could not produce a valid container."
+                            : QString::fromStdString(texReport.shortReason),
+                        QString::fromStdString(diagDetail), false);
         return;
       }
 
       gf::core::logInfo(gf::core::LogCategory::TextureReplace,
                         "Pipeline succeeded",
-                        replaceResult->summary + " | outSize="
-                        + std::to_string(replaceResult->containerBytes.size())
+                        replaceResult->summary
+                        + " | origFmt=" + texReport.origFormatName
+                        + " | rebuiltFmt=" + texReport.rebuiltFormatName
+                        + " | mips=" + std::to_string(texReport.rebuiltMipCount)
+                        + " | payloadMatch=" + (texReport.payloadSizeMatch ? "yes" : "no")
+                        + " | outSize=" + std::to_string(replaceResult->containerBytes.size())
                         + " | entry=" + item->text(0).toStdString());
 
       // Replace newBytes with the rebuilt container.

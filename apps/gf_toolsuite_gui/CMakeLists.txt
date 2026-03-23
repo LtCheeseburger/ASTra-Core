@@ -34,6 +34,35 @@ set(GF_TOOLS_GUI_SOURCES
   src/apt_editor/AptPreviewItem.cpp
   src/apt_editor/AptSelectionManager.cpp
   src/rsf_editor/RsfPreviewWidget.cpp
+  src/ModProfileStore.cpp
+  src/ModWorkspaceManager.cpp
+  src/ModProfileManager.cpp
+  src/ProfileContextService.cpp
+  src/ActiveProfileWidget.cpp
+  src/ModProfilesDialog.cpp
+  src/ModManifestReader.cpp
+  src/ModRegistryStore.cpp
+  src/ModInstallPlanner.cpp
+  src/ModInstallTransaction.cpp
+  src/ModInstaller.cpp
+  src/InstallModDialog.cpp
+  src/ModPackageExporter.cpp
+  src/ExportModDialog.cpp
+  src/ModAssetValidator.cpp
+  src/ModMetadataEditorDialog.cpp
+  src/ProfileWorkspaceNaming.cpp
+  src/ShellHelper.cpp
+  src/ModCatalogService.cpp
+  src/InstalledModsModel.cpp
+  src/InstalledModsDialog.cpp
+  src/RuntimeTargetManager.cpp
+  src/BaselineCaptureService.cpp
+  src/RuntimeSetupDialog.cpp
+  src/ProfileResolverService.cpp
+  src/ProfileApplyService.cpp
+  src/DeploymentStateStore.cpp
+  src/DriftDetector.cpp
+  src/LaunchService.cpp
 )
 
 set(GF_TOOLS_GUI_HEADERS
@@ -60,6 +89,44 @@ set(GF_TOOLS_GUI_HEADERS
   src/apt_editor/AptPreviewItem.hpp
   src/apt_editor/AptSelectionManager.hpp
   src/rsf_editor/RsfPreviewWidget.hpp
+  src/ModProfile.hpp
+  src/RuntimeContentRoot.hpp
+  src/ModProfileStore.hpp
+  src/ModWorkspaceManager.hpp
+  src/ModProfileManager.hpp
+  src/ProfileContextService.hpp
+  src/ActiveProfileWidget.hpp
+  src/ModProfilesDialog.hpp
+  src/ModManifest.hpp
+  src/ModManifestReader.hpp
+  src/ModInstallPlan.hpp
+  src/InstalledModRecord.hpp
+  src/ModRegistryStore.hpp
+  src/ModInstallPlanner.hpp
+  src/ModInstallTransaction.hpp
+  src/ModInstaller.hpp
+  src/InstallModDialog.hpp
+  src/ModPackageSpec.hpp
+  src/ModPackageExporter.hpp
+  src/ExportModDialog.hpp
+  src/ModAssetValidator.hpp
+  src/ModMetadataEditorDialog.hpp
+  src/ProfileWorkspaceNaming.hpp
+  src/ShellHelper.hpp
+  src/ModCatalogEntry.hpp
+  src/ModCatalogService.hpp
+  src/InstalledModsModel.hpp
+  src/InstalledModsDialog.hpp
+  src/RuntimeTargetConfig.hpp
+  src/RuntimeTargetManager.hpp
+  src/BaselineCaptureService.hpp
+  src/RuntimeSetupDialog.hpp
+  src/ProfileResolverService.hpp
+  src/ProfileApplyService.hpp
+  src/DeploymentState.hpp
+  src/DeploymentStateStore.hpp
+  src/DriftDetector.hpp
+  src/LaunchService.hpp
 )
 
 set(GF_TOOLS_GUI_RESOURCES

@@ -10,8 +10,10 @@ namespace gf::textures {
 
 /// Target DDS format for the build pipeline.
 enum class DdsBuildFormat {
-    DXT1,   ///< BC1 — suitable for colour maps without alpha
-    DXT5,   ///< BC3 — suitable for colour maps with alpha, normal maps, etc.
+    DXT1,  ///< BC1  — colour, opaque or 1-bit alpha  (8 bytes/block, FourCC "DXT1")
+    DXT5,  ///< BC3  — colour + full alpha             (16 bytes/block, FourCC "DXT5")
+    BC4,   ///< ATI1 — single channel (R)              (8 bytes/block, FourCC "ATI1")
+    BC5,   ///< ATI2 — two channels (RG, normal maps)  (16 bytes/block, FourCC "ATI2")
 };
 
 /// Parameters driving a TGA→DDS conversion.

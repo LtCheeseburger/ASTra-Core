@@ -8,8 +8,10 @@ namespace gf::textures {
 
 /// Supported block-compression targets for this encoder.
 enum class DxtEncodeFormat {
-    DXT1,   ///< BC1 — opaque or 1-bit alpha, 0.5 bytes/texel
-    DXT5,   ///< BC3 — full alpha, 1 byte/texel
+    DXT1,  ///< BC1 — opaque or 1-bit alpha, 0.5 bytes/texel
+    DXT5,  ///< BC3 — full alpha, 1 byte/texel
+    BC4,   ///< ATI1 — single channel (R only), 0.5 bytes/texel, same size as DXT1
+    BC5,   ///< ATI2 — two channels (RG), 1 byte/texel, same size as DXT5
 };
 
 /// Compress a single RGBA mip level into a DXT block stream.

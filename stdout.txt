@@ -1,0 +1,19 @@
+RNG seed: 1068441835
+D:/source/ASTra-stripped/tests/unit/test_texture_replace.cpp:352: failed: info.has_value() for: false
+D:/source/ASTra-stripped/tests/unit/test_dds_validate.cpp:176: failed: parsed.has_value() for: false
+D:/source/ASTra-stripped/tests/unit/test_dds_validate.cpp:189: failed: rebuilt.has_value() for: false
+D:/source/ASTra-stripped/tests/unit/test_dds_validate.cpp:199: failed: prep.ok() for: false
+D:/source/ASTra-stripped/tests/unit/test_apt_display_list.cpp:36: failed: resolved1.placements.size() == 1 for: 0 == 1
+D:/source/ASTra-stripped/tests/unit/test_ast_container_builder.cpp:70: failed: builder.save_to_disk(outp, &err) for: false
+D:/source/ASTra-stripped/tests/unit/test_ast_container_editor.cpp:194: failed: ed2Opt.has_value() for: false
+D:/source/ASTra-stripped/tests/unit/test_ast_container_editor.cpp:240: failed: ed2Opt.has_value() for: false
+D:/source/ASTra-stripped/tests/unit/test_ast_container_editor.cpp:265: failed: ed2Opt.has_value() for: false
+D:/source/ASTra-stripped/tests/unit/test_ast_container_editor.cpp:294: failed: ed2Opt.has_value() for: false
+D:/source/ASTra-stripped/tests/unit/test_ast_container_editor.cpp:356: failed: AstContainerEditor::validate(span, &err) for: false
+D:/source/ASTra-stripped/tests/unit/test_scan_heuristics.cpp:28: failed: c.big_count == 1 for: 0 == 1
+D:/source/ASTra-stripped/tests/unit/test_features.cpp:9: failed: feature_enabled(Feature::AstEditor) == false for: true == false
+[2026-03-20 22:17:41.344] [info] Wrote default config: test_config.json
+test cases:  78 |  65 passed | 13 failed
+assertions: 799 | 786 passed | 13 failed
+
+

@@ -5,15 +5,16 @@
 // Architecture overview:
 //
 //   User TGA (or DDS advanced)
-//     ↓  load_source_rgba()        — decode TGA → RGBA, or decode DDS mip-0 → RGBA
-//     ↓  parse_original_texture_info()  — read container metadata
-//     ↓  validate_source_vs_original()  — dimensions, format compat
-//     ↓  build_mip_chain()         — dds_build path (box downsample + BC compress)
-//     ↓  rebuild_container()       — DDS / P3R header swap / XPR2 patch
-//     ↓  TextureReplaceResult
+//     ↓  load_source_rgba()              — decode TGA → RGBA
+//     ↓  parse_original_texture_info()   — read container metadata
+//     ↓  validate dimensions/format
+//     ↓  build_dds_payload()             — mip chain + BC compress (once)
+//     ↓  rebuild_container()             — DDS / P3R header swap / XPR2 patch
+//     ↓  TextureReplaceResult + TextureReplaceReport
 //
 // Failure policy: every sub-step returns std::nullopt on error and fills *err.
 // replace_texture() propagates the first error and never writes partial data.
+// TextureReplaceReport is filled even on failure for diagnostic purposes.
 
 #include <gf/textures/texture_replace.hpp>
 
@@ -61,12 +62,18 @@ static std::uint8_t xpr2_fmt_to_bc_code(std::uint8_t xpr2Fmt) noexcept {
     }
 }
 
-// Map bcFormatCode to DdsBuildFormat (supports DXT1 + DXT5; all others
-// are mapped conservatively to DXT5 because DXT5 is a superset).
-static DdsBuildFormat bc_code_to_build_format(std::uint8_t code) noexcept {
+// Map bcFormatCode to DdsBuildFormat.
+// Returns nullopt for formats with no encoder (DXT3) or unknown codes.
+static std::optional<DdsBuildFormat> bc_code_to_build_format(std::uint8_t code) noexcept {
     switch (code) {
     case 0x01: return DdsBuildFormat::DXT1;
-    default:   return DdsBuildFormat::DXT5; // DXT3/BC4/BC5 — use DXT5 as safe superset
+    case 0x05: return DdsBuildFormat::DXT5;
+    case 0x04: return DdsBuildFormat::BC4;
+    case 0x06: return DdsBuildFormat::BC5;
+    // 0x03 = DXT3/BC2: explicit alpha (not interpolated).  No encoder in this
+    // build.  Fail with a clear message rather than silently writing DXT5 data
+    // with the wrong block structure.
+    default:   return std::nullopt;
     }
 }
 
@@ -81,11 +88,45 @@ static const char* bc_code_name(std::uint8_t code) noexcept {
     }
 }
 
+// Compute the expected compressed size (bytes) for one mip level.
+static std::size_t mip_linear_bytes(std::uint32_t w, std::uint32_t h,
+                                    std::uint8_t bcCode) noexcept {
+    const std::uint32_t bw = std::max(1u, (w + 3u) / 4u);
+    const std::uint32_t bh = std::max(1u, (h + 3u) / 4u);
+    const std::size_t bpb  = (bcCode == 0x01 || bcCode == 0x04) ? 8u : 16u;
+    return static_cast<std::size_t>(bw) * bh * bpb;
+}
+
+// Fill per-mip diagnostics for a known mip chain (no actual data needed).
+static void fill_mip_diagnostics(TextureReplaceReport& rpt,
+                                  std::uint32_t w, std::uint32_t h,
+                                  std::uint32_t mipCount,
+                                  std::uint8_t bcCode,
+                                  bool platformPacked) {
+    rpt.mips.clear();
+    rpt.expectedPayloadBytes = 0;
+    std::uint32_t mw = w, mh = h;
+    for (std::uint32_t m = 0; m < mipCount; ++m) {
+        MipLevelDiagnostic d;
+        d.level        = m;
+        d.width        = mw;
+        d.height       = mh;
+        d.widthBlocks  = std::max(1u, (mw + 3u) / 4u);
+        d.heightBlocks = std::max(1u, (mh + 3u) / 4u);
+        d.linearBytes  = mip_linear_bytes(mw, mh, bcCode);
+        d.packedBytes  = platformPacked ? 0 : 0; // XPR2 pads; set to 0 here
+        rpt.mips.push_back(d);
+        rpt.expectedPayloadBytes += d.linearBytes;
+        if (mw == 1u && mh == 1u) break;
+        mw = std::max(1u, mw >> 1u);
+        mh = std::max(1u, mh >> 1u);
+    }
+}
+
 // Try to rebuild a raw EA-wrapped payload into a standard DDS blob.
 static std::vector<std::uint8_t> try_rebuild_ea_dds(
     std::span<const std::uint8_t> bytes, std::uint32_t astFlags)
 {
-    // Already a DDS?
     if (bytes.size() >= 4 && bytes[0]=='D' && bytes[1]=='D' && bytes[2]=='S' && bytes[3]==' ')
         return std::vector<std::uint8_t>(bytes.begin(), bytes.end());
     EaDdsInfo info{};
@@ -94,8 +135,7 @@ static std::vector<std::uint8_t> try_rebuild_ea_dds(
     return {};
 }
 
-// Decode any source image (TGA or DDS mip-0) to RGBA pixels.
-// Returns empty on failure and fills *err.
+// Decode any source image (TGA) to RGBA pixels.
 struct RgbaSource {
     std::uint32_t width  = 0;
     std::uint32_t height = 0;
@@ -121,9 +161,7 @@ static std::optional<RgbaSource> load_source_rgba(
         return RgbaSource{img->width, img->height, std::move(img->rgba)};
     }
 
-    // DDS advanced: decode mip-0 to RGBA for pixel comparison / validation.
-    // We still use the raw DDS bytes for the rebuild — we just need RGBA to
-    // verify dimensions are consistent.
+    // DDS advanced: decode mip-0 to RGBA for dimension validation only.
     auto img = decode_dds_mip_rgba(importBytes, 0);
     if (!img || img->rgba.empty()) {
         if (err) *err = "DDS import: could not decode mip-0 to RGBA. "
@@ -133,15 +171,29 @@ static std::optional<RgbaSource> load_source_rgba(
     return RgbaSource{img->width, img->height, std::move(img->rgba)};
 }
 
-// Rebuild a minimal DDS blob from RGBA for use with the P3R / plain-DDS paths.
-// Uses the OriginalTextureInfo to select the right BC format and mip count.
+// Build a DDS from RGBA using the original texture's format/dimensions/mips.
+// Returns nullopt and sets *err if the format is unsupported or build fails.
 static std::optional<std::vector<std::uint8_t>> build_dds_payload(
     const RgbaSource&          src,
     const OriginalTextureInfo& orig,
     std::string*               err)
 {
+    auto fmtOpt = bc_code_to_build_format(orig.bcFormatCode);
+    if (!fmtOpt) {
+        if (err) {
+            std::ostringstream os;
+            os << "Format " << bc_code_name(orig.bcFormatCode)
+               << " (code 0x" << std::hex << static_cast<int>(orig.bcFormatCode) << std::dec
+               << ") has no encoder in this build. "
+               << "Use DDS-advanced import with a pre-compressed DDS file that exactly "
+               << "matches the original format, dimensions, and mip count.";
+            *err = os.str();
+        }
+        return std::nullopt;
+    }
+
     DdsBuildParams p;
-    p.format    = bc_code_to_build_format(orig.bcFormatCode);
+    p.format    = *fmtOpt;
     p.target_w  = orig.width;
     p.target_h  = orig.height;
     p.mip_count = orig.mipCount; // 0 = full chain
@@ -157,24 +209,18 @@ static std::optional<std::vector<std::uint8_t>> build_dds_payload(
     return dds;
 }
 
-// Returns true if v is a power of two (and non-zero).
 static bool is_power_of_two(std::uint32_t v) noexcept {
     return v > 0 && (v & (v - 1)) == 0;
 }
 
-// Validate that source dimensions are acceptable for the target.
-// Strict mode: must be identical.
-static std::string check_dimensions(const RgbaSource& src, const OriginalTextureInfo& orig) {
+static std::string check_dimensions(const RgbaSource& src,
+                                     const OriginalTextureInfo& orig) {
     if (src.width != orig.width || src.height != orig.height) {
         std::ostringstream os;
         os << "Source dimensions " << src.width << "x" << src.height
            << " do not match original " << orig.width << "x" << orig.height << ".";
         return os.str();
     }
-
-    // BC-compressed formats require dimensions that are multiples of 4.
-    // A 0-mod-4 check on the *original* dimensions covers the common case since
-    // source and original must match at this point.
     if ((orig.width % 4 != 0) || (orig.height % 4 != 0)) {
         std::ostringstream os;
         os << "BC-compressed textures require width and height to be multiples of 4. "
@@ -182,8 +228,6 @@ static std::string check_dimensions(const RgbaSource& src, const OriginalTexture
            << " — replacement would produce an invalid texture.";
         return os.str();
     }
-
-    // XPR2 (Xbox 360) textures additionally require power-of-2 dimensions.
     if (orig.container == TexContainerKind::XPR2) {
         if (!is_power_of_two(orig.width) || !is_power_of_two(orig.height)) {
             std::ostringstream os;
@@ -192,16 +236,13 @@ static std::string check_dimensions(const RgbaSource& src, const OriginalTexture
             return os.str();
         }
     }
-
     return {};
 }
 
-// Check that a DDS-advanced import satisfies the format contract for the original.
 static std::string check_dds_contract(
     std::span<const std::uint8_t> ddsBytes,
     const OriginalTextureInfo&    orig)
 {
-    // Must start with DDS magic.
     if (ddsBytes.size() < 4 || std::memcmp(ddsBytes.data(), "DDS ", 4) != 0)
         return "Replacement file is not a DDS file.";
 
@@ -228,19 +269,14 @@ static std::string check_dds_contract(
     if (importCode != orig.bcFormatCode)
         issues << "Format mismatch: DDS=" << bc_code_name(importCode)
                << " original=" << bc_code_name(orig.bcFormatCode) << ". ";
-
-    // BC formats require dimensions to be multiples of 4.
     if (info->width % 4 != 0 || info->height % 4 != 0)
         issues << "DDS dimensions (" << info->width << "x" << info->height
                << ") are not multiples of 4 as required by BC block compression. ";
-
-    // XPR2 additionally requires power-of-2 dimensions.
     if (orig.container == TexContainerKind::XPR2) {
         if (!is_power_of_two(info->width) || !is_power_of_two(info->height))
             issues << "XPR2 target requires power-of-2 dimensions; DDS reports "
                    << info->width << "x" << info->height << ". ";
     }
-
     return issues.str();
 }
 
@@ -256,11 +292,6 @@ TexContainerKind detect_container_kind(std::span<const std::uint8_t> p) noexcept
     if ((p[0]=='P'||p[0]=='p') && p[1]=='3' && (p[2]=='R'||p[2]=='r'))
         return TexContainerKind::P3R;
     if (std::memcmp(p.data(), "DDS ", 4) == 0) return TexContainerKind::DDS;
-    // EA-wrapped DDS (no standard magic at offset 0): treat as DDS family.
-    if (p.size() >= 8) {
-        // A non-zero width/height in the EA header region is a reasonable heuristic,
-        // but the safest fallback is Unknown — let ea_dds_rebuild handle it.
-    }
     return TexContainerKind::Unknown;
 }
 
@@ -281,16 +312,15 @@ std::optional<OriginalTextureInfo> parse_original_texture_info(
 
     // ── XPR2 ────────────────────────────────────────────────────────────────
     if (info.container == TexContainerKind::XPR2) {
-        std::string xprErr;
         auto xprInfo = parse_xpr2_info(payload);
         if (!xprInfo) {
             if (err) *err = "Could not parse XPR2 metadata.";
             return std::nullopt;
         }
-        info.width         = xprInfo->width;
-        info.height        = xprInfo->height;
-        info.mipCount      = xprInfo->mip_count;
-        info.bcFormatCode  = xpr2_fmt_to_bc_code(xprInfo->fmt_code);
+        info.width          = xprInfo->width;
+        info.height         = xprInfo->height;
+        info.mipCount       = xprInfo->mip_count;
+        info.bcFormatCode   = xpr2_fmt_to_bc_code(xprInfo->fmt_code);
         info.xpr2RawFmtCode = xprInfo->fmt_code;
         if (!info.valid()) {
             if (err) *err = "XPR2 reports zero or invalid dimensions.";
@@ -301,17 +331,12 @@ std::optional<OriginalTextureInfo> parse_original_texture_info(
 
     // ── P3R ─────────────────────────────────────────────────────────────────
     if (info.container == TexContainerKind::P3R) {
-        // Preserve the version byte for round-trip.
         info.p3rVersionByte = (payload.size() >= 4) ? payload[3] : 0x02;
 
-        // Reconstruct DDS header to extract metadata.
-        // Both 'p' (0x70) and 'P' (0x50) variants are found in the wild;
-        // we just need "DDS " to satisfy parse_dds_info.
         std::vector<std::uint8_t> tmp(payload.begin(), payload.end());
         if (tmp.size() >= 4) { tmp[0]='D'; tmp[1]='D'; tmp[2]='S'; tmp[3]=' '; }
         auto ddsInfo = parse_dds_info(std::span<const std::uint8_t>(tmp.data(), tmp.size()));
         if (!ddsInfo) {
-            // Try the ea_dds_rebuild path (some P3R have EA headers, not raw DDS bodies).
             auto rebuilt = try_rebuild_ea_dds(payload, astFlags);
             if (!rebuilt.empty())
                 ddsInfo = parse_dds_info(std::span<const std::uint8_t>(rebuilt.data(), rebuilt.size()));
@@ -355,7 +380,7 @@ std::optional<OriginalTextureInfo> parse_original_texture_info(
         if (!rebuilt.empty()) {
             auto ddsInfo = parse_dds_info(std::span<const std::uint8_t>(rebuilt.data(), rebuilt.size()));
             if (ddsInfo && ddsInfo->width > 0 && ddsInfo->height > 0) {
-                info.container    = TexContainerKind::DDS; // treat as DDS after rebuild
+                info.container    = TexContainerKind::DDS;
                 info.width        = ddsInfo->width;
                 info.height       = ddsInfo->height;
                 info.mipCount     = ddsInfo->mipCount;
@@ -382,16 +407,28 @@ std::string validate_texture_import(
     if (!origInfo)
         return "Cannot read original texture metadata: " + parseErr;
 
-    if (importFormat == TexImportFormat::DDS_Advanced) {
+    if (importFormat == TexImportFormat::DDS_Advanced)
         return check_dds_contract(importBytes, *origInfo);
-    }
 
-    // TGA: quick dimension check only (no compression work).
+    // TGA: check dimensions and that the format has an encoder.
     std::string tgaErr;
     auto img = read_tga(importBytes, &tgaErr);
     if (!img) return "TGA parse error: " + tgaErr;
 
-    return check_dimensions(RgbaSource{img->width, img->height, {}}, *origInfo);
+    const std::string dimIssue =
+        check_dimensions(RgbaSource{img->width, img->height, {}}, *origInfo);
+    if (!dimIssue.empty()) return dimIssue;
+
+    // Surface the "no encoder" problem at validation time, not during replace.
+    if (!bc_code_to_build_format(origInfo->bcFormatCode)) {
+        std::ostringstream os;
+        os << "Format " << bc_code_name(origInfo->bcFormatCode)
+           << " cannot be rebuilt from TGA — no encoder available. "
+           << "Use DDS-advanced import instead.";
+        return os.str();
+    }
+
+    return {};
 }
 
 // ── Public: replace_texture ───────────────────────────────────────────────────
@@ -401,10 +438,18 @@ std::optional<TextureReplaceResult> replace_texture(
     std::span<const std::uint8_t> importBytes,
     TexImportFormat                importFormat,
     std::uint32_t                  astFlags,
-    std::string*                   err)
+    std::string*                   err,
+    TextureReplaceReport*          report)
 {
-    auto fail = [&](const std::string& msg) -> std::optional<TextureReplaceResult> {
+    // Helper: fill report + err and return nullopt.
+    auto fail = [&](const std::string& msg,
+                    const std::string& detail = {}) -> std::optional<TextureReplaceResult> {
         if (err) *err = msg;
+        if (report) {
+            report->success      = false;
+            report->shortReason  = msg;
+            report->detailReason = detail.empty() ? msg : detail;
+        }
         return std::nullopt;
     };
 
@@ -414,39 +459,52 @@ std::optional<TextureReplaceResult> replace_texture(
     if (!origInfo)
         return fail("Cannot read original texture metadata: " + origErr);
 
+    // Populate report fields from origInfo immediately.
+    if (report) {
+        report->containerKind    = origInfo->container;
+        report->origWidth        = origInfo->width;
+        report->origHeight       = origInfo->height;
+        report->origMipCount     = origInfo->mipCount;
+        report->origBcFormatCode = origInfo->bcFormatCode;
+        report->origFormatName   = bc_code_name(origInfo->bcFormatCode);
+    }
+
     // ── Step 2: DDS-advanced path ─────────────────────────────────────────
-    // The caller has already supplied a fully-formed DDS. We validate its
-    // contract and then feed it directly into the container rebuild step.
     if (importFormat == TexImportFormat::DDS_Advanced) {
         const std::string contractIssues = check_dds_contract(importBytes, *origInfo);
         if (!contractIssues.empty())
             return fail("DDS import contract violation: " + contractIssues);
 
-        // The raw DDS blob is the source for the rebuild.
         std::vector<std::uint8_t> ddsBlob(importBytes.begin(), importBytes.end());
+
+        if (report) {
+            report->rebuiltBcFormatCode    = origInfo->bcFormatCode;
+            report->rebuiltFormatName      = bc_code_name(origInfo->bcFormatCode);
+            report->rebuiltMipCount        = origInfo->mipCount;
+            fill_mip_diagnostics(*report, origInfo->width, origInfo->height,
+                                 origInfo->mipCount, origInfo->bcFormatCode,
+                                 origInfo->container == TexContainerKind::XPR2);
+        }
 
         TextureReplaceResult result;
         result.usedDdsAdvanced = true;
 
         switch (origInfo->container) {
         case TexContainerKind::P3R: {
-            // Swap magic back to P3R<ver> using lowercase 'p' (0x70).
-            // EASE's DDStoP3R hardcodes data[0]=112 (0x70). The PS3 game loader
-            // only accepts the lowercase variant — uppercase 'P' causes rejection.
             if (ddsBlob.size() >= 4) {
-                ddsBlob[0] = 0x70; // 'p' lowercase
+                ddsBlob[0] = 0x70; // 'p' lowercase — required by PS3 EA loader
                 ddsBlob[1] = '3';
                 ddsBlob[2] = 'R';
                 ddsBlob[3] = origInfo->p3rVersionByte;
             }
             result.containerBytes = std::move(ddsBlob);
             result.summary = "DDS → P3R (advanced import, format preserved)";
-            return result;
+            break;
         }
         case TexContainerKind::DDS: {
             result.containerBytes = std::move(ddsBlob);
             result.summary = "DDS → DDS (advanced import, format preserved)";
-            return result;
+            break;
         }
         case TexContainerKind::XPR2: {
             std::string xprErr;
@@ -456,11 +514,19 @@ std::optional<TextureReplaceResult> replace_texture(
                 return fail("XPR2 container rebuild failed: " + xprErr);
             result.containerBytes = std::move(*patched);
             result.summary = "DDS → XPR2 (advanced import)";
-            return result;
+            if (report) report->platformPackingApplied = true;
+            break;
         }
         default:
             return fail("DDS-advanced import is not supported for this container type.");
         }
+
+        if (report) {
+            report->builtPayloadBytes = result.containerBytes.size();
+            report->success = true;
+            report->shortReason = result.summary;
+        }
+        return result;
     }
 
     // ── Step 3: TGA path — decode source pixels ───────────────────────────
@@ -468,24 +534,74 @@ std::optional<TextureReplaceResult> replace_texture(
     auto src = load_source_rgba(importBytes, importFormat, &srcErr);
     if (!src) return fail(srcErr);
 
+    if (report) {
+        report->importedWidth  = src->width;
+        report->importedHeight = src->height;
+    }
+
     // ── Step 4: Validate dimensions ───────────────────────────────────────
     const std::string dimIssue = check_dimensions(*src, *origInfo);
     if (!dimIssue.empty()) return fail(dimIssue);
 
-    // ── Step 5 & 6: Build DDS (mip chain + BC compression) ───────────────
+    // ── Step 4b: Check that the original format has an encoder ────────────
+    if (!bc_code_to_build_format(origInfo->bcFormatCode)) {
+        std::ostringstream short_msg;
+        short_msg << "Format " << bc_code_name(origInfo->bcFormatCode)
+                  << " cannot be rebuilt from TGA.";
+        std::ostringstream detail;
+        detail << short_msg.str() << "\n\n"
+               << "No TGA-based encoder exists for "
+               << bc_code_name(origInfo->bcFormatCode) << " in this build. "
+               << "Use DDS-advanced import with a pre-compressed DDS file that exactly "
+               << "matches the original: format=" << bc_code_name(origInfo->bcFormatCode)
+               << ", dimensions=" << origInfo->width << "x" << origInfo->height
+               << ", mips=" << origInfo->mipCount << ".";
+        return fail(short_msg.str(), detail.str());
+    }
+
+    // ── Step 5 & 6: Build DDS (mip chain + BC compression, once) ─────────
     std::string buildErr;
     auto dds = build_dds_payload(*src, *origInfo, &buildErr);
     if (!dds) return fail(buildErr);
 
+    // Determine the actual mip count that was built.
+    const std::uint32_t builtMips = [&]() -> std::uint32_t {
+        if (dds->size() < 128) return 1;
+        const auto* hdr = dds->data();
+        const std::uint32_t m = static_cast<std::uint32_t>(hdr[28]) |
+                                (static_cast<std::uint32_t>(hdr[29]) << 8) |
+                                (static_cast<std::uint32_t>(hdr[30]) << 16) |
+                                (static_cast<std::uint32_t>(hdr[31]) << 24);
+        return std::max(1u, m);
+    }();
+
+    if (report) {
+        report->rebuiltBcFormatCode = origInfo->bcFormatCode;
+        report->rebuiltFormatName   = bc_code_name(origInfo->bcFormatCode);
+        report->rebuiltMipCount     = builtMips;
+        fill_mip_diagnostics(*report, origInfo->width, origInfo->height,
+                             builtMips, origInfo->bcFormatCode,
+                             origInfo->container == TexContainerKind::XPR2);
+        report->builtPayloadBytes = dds->size() >= 128
+                                        ? dds->size() - 128 : 0;
+        report->payloadSizeMatch  = (report->builtPayloadBytes == report->expectedPayloadBytes);
+    }
+
     // ── Step 7: Rebuild container ─────────────────────────────────────────
     TextureReplaceResult result;
+
+    auto make_summary = [&](const char* prefix) -> std::string {
+        std::ostringstream os;
+        os << prefix << " (" << bc_code_name(origInfo->bcFormatCode)
+           << " " << origInfo->width << "x" << origInfo->height
+           << " mips=" << builtMips << ")";
+        return os.str();
+    };
 
     switch (origInfo->container) {
     case TexContainerKind::DDS: {
         result.containerBytes = std::move(*dds);
-        result.summary = "TGA → DDS (" + std::string(bc_code_name(origInfo->bcFormatCode)) +
-                         " " + std::to_string(origInfo->width) + "x" + std::to_string(origInfo->height) +
-                         " mips=" + std::to_string(origInfo->mipCount) + ")";
+        result.summary = make_summary("TGA → DDS");
         break;
     }
     case TexContainerKind::P3R: {
@@ -502,28 +618,22 @@ std::optional<TextureReplaceResult> replace_texture(
             b[3] = origInfo->p3rVersionByte;
         }
         result.containerBytes = std::move(b);
-        result.summary = "TGA → P3R (" + std::string(bc_code_name(origInfo->bcFormatCode)) +
-                         " " + std::to_string(origInfo->width) + "x" + std::to_string(origInfo->height) +
-                         " mips=" + std::to_string(origInfo->mipCount) +
-                         " ver=0x" + [&](){
-                             char buf[4]; std::snprintf(buf, sizeof(buf), "%02X", origInfo->p3rVersionByte);
-                             return std::string(buf); }() + ")";
+        result.summary = make_summary("TGA → P3R");
         break;
     }
     case TexContainerKind::XPR2: {
-        // Feed the freshly-built DDS into dds_to_xpr2_patch, which handles
-        // retiling and swap16 to produce the correct Xbox 360 container.
+        // Feed the freshly-built DDS into dds_to_xpr2_patch:
+        //   linear DXT → XGAddress retile → swap16 → XPR2 payload
         std::string xprErr;
         auto patched = dds_to_xpr2_patch(
             originalPayload,
             std::span<const std::uint8_t>(dds->data(), dds->size()),
             &xprErr);
         if (!patched || patched->empty())
-            return fail("XPR2 container rebuild failed: " + xprErr);
+            return fail("XPR2 container rebuild failed: " + xprErr, xprErr);
         result.containerBytes = std::move(*patched);
-        result.summary = "TGA → XPR2 (" + std::string(bc_code_name(origInfo->bcFormatCode)) +
-                         " " + std::to_string(origInfo->width) + "x" + std::to_string(origInfo->height) +
-                         " mips=" + std::to_string(origInfo->mipCount) + ")";
+        result.summary = make_summary("TGA → XPR2");
+        if (report) report->platformPackingApplied = true;
         break;
     }
     default:
@@ -531,9 +641,15 @@ std::optional<TextureReplaceResult> replace_texture(
                     std::to_string(static_cast<int>(origInfo->container)));
     }
 
-    // ── Step 8: Final sanity check — must not produce an empty payload ─────
+    // ── Step 8: Final sanity — must not produce an empty payload ──────────
     if (result.containerBytes.empty())
         return fail("Container rebuild produced empty output — replacement aborted.");
+
+    if (report) {
+        report->builtPayloadBytes = result.containerBytes.size();
+        report->success           = true;
+        report->shortReason       = result.summary;
+    }
 
     return result;
 }

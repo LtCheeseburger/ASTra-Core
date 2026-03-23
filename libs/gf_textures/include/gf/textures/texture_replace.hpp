@@ -90,6 +90,53 @@ std::optional<OriginalTextureInfo> parse_original_texture_info(
     std::uint32_t                  astFlags = 0,
     std::string*                   err      = nullptr);
 
+// ── Structured replacement diagnostics ───────────────────────────────────────
+// Filled by replace_texture() regardless of success or failure.
+// Pass a pointer to an instance (or nullptr to skip) via the report parameter.
+
+struct MipLevelDiagnostic {
+    std::uint32_t level        = 0;
+    std::uint32_t width        = 0;
+    std::uint32_t height       = 0;
+    std::uint32_t widthBlocks  = 0;
+    std::uint32_t heightBlocks = 0;
+    std::size_t   linearBytes  = 0; // compressed bytes without platform packing
+    std::size_t   packedBytes  = 0; // bytes after tiling/swap (0 if not applicable)
+};
+
+struct TextureReplaceReport {
+    // ── Original texture ──────────────────────────────────────────────────
+    TexContainerKind containerKind    = TexContainerKind::Unknown;
+    std::uint32_t    origWidth        = 0;
+    std::uint32_t    origHeight       = 0;
+    std::uint32_t    origMipCount     = 0;
+    std::uint8_t     origBcFormatCode = 0;
+    std::string      origFormatName;
+
+    // ── Imported source ───────────────────────────────────────────────────
+    std::uint32_t    importedWidth  = 0;
+    std::uint32_t    importedHeight = 0;
+
+    // ── Rebuild ───────────────────────────────────────────────────────────
+    std::uint8_t  rebuiltBcFormatCode     = 0;
+    std::string   rebuiltFormatName;
+    std::uint32_t rebuiltMipCount         = 0;
+    bool          platformPackingApplied  = false;
+
+    // ── Per-mip breakdown ─────────────────────────────────────────────────
+    std::vector<MipLevelDiagnostic> mips;
+
+    // ── Payload size validation ───────────────────────────────────────────
+    std::size_t expectedPayloadBytes = 0; // sum of linear bytes across all mips
+    std::size_t builtPayloadBytes    = 0; // actual bytes in containerBytes payload
+    bool        payloadSizeMatch     = false;
+
+    // ── Outcome ───────────────────────────────────────────────────────────
+    bool        success      = false;
+    std::string shortReason;  // ≤1 sentence, suitable for the UI status label
+    std::string detailReason; // may be multi-line, suitable for the log / copy-report
+};
+
 // ── Replacement result ────────────────────────────────────────────────────────
 
 struct TextureReplaceResult {
@@ -119,12 +166,15 @@ struct TextureReplaceResult {
 //
 // Returns nullopt and fills *err on any failure.  Callers MUST treat a nullopt
 // result as a hard failure and abort the replacement.
+// `report` — when non-null, receives full diagnostics for every stage; populated
+//            even on failure so the caller can log / display detailed context.
 std::optional<TextureReplaceResult> replace_texture(
     std::span<const std::uint8_t> originalPayload,
     std::span<const std::uint8_t> importBytes,
     TexImportFormat                importFormat,
     std::uint32_t                  astFlags = 0,
-    std::string*                   err      = nullptr);
+    std::string*                   err      = nullptr,
+    TextureReplaceReport*          report   = nullptr);
 
 // ── Validation helper (for UI "preview" before committing) ───────────────────
 // Returns a non-empty error string if the import is definitively incompatible,

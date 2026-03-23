@@ -12,10 +12,11 @@ struct ReleaseInfo;
 enum class BadgeStatus {
     Idle,              // no check has run yet (shows version only)
     Checking,          // check in progress
-    Latest,            // up to date
+    Latest,            // up to date — matches the latest channel release
     UpdateAvailable,   // newer stable release found
     BetaAvailable,     // newer beta/RC release found
     NightlyAvailable,  // newer nightly/dev release found
+    PreReleaseBuild,   // local version is AHEAD of the latest GitHub release
     Error              // network or parse failure
 };
 
@@ -42,6 +43,9 @@ public:
 
     // Update the badge when a newer release was found.
     void setStatusUpdateAvailable(const ReleaseInfo& info);
+
+    // Update the badge when this build is ahead of the latest GitHub release.
+    void setStatusPreReleaseBuild(const ReleaseInfo& latestRelease);
 
     // Update the badge when the check failed (network / parse error).
     void setStatusError(const QString& reason);

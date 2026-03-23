@@ -74,8 +74,14 @@ signals:
     // A newer release that is eligible under the configured channel was found.
     void updateAvailable(const gf::gui::update::ReleaseInfo& info);
 
-    // No newer release is available for the configured channel.
+    // No newer release is available; the installed version matches the latest
+    // channel-eligible release on GitHub.
     void upToDate();
+
+    // The installed version is AHEAD of the latest channel-eligible release on
+    // GitHub — this build is a pre-release / development build.
+    // `latestRelease` is the latest known stable/channel release for context.
+    void localAhead(const gf::gui::update::ReleaseInfo& latestRelease);
 
     // The check could not complete (network error, JSON parse failure, etc.).
     void checkFailed(const QString& errorMessage);
