@@ -4,12 +4,9 @@
 #include <QDateTime>
 #include <QFileDialog>
 #include <QFormLayout>
-#include <QGroupBox>
 #include <QHBoxLayout>
-#include <QInputDialog>
 #include <QLabel>
 #include <QLineEdit>
-#include <QListWidget>
 #include <QPushButton>
 #include <QTextBrowser>
 #include <QVBoxLayout>
@@ -23,7 +20,7 @@ RuntimeSetupDialog::RuntimeSetupDialog(const QString& gameId,
     , m_gameId(gameId)
 {
     setWindowTitle(QString("Configure Runtime \u2014 %1").arg(gameDisplayName));
-    setMinimumWidth(560);
+    setMinimumWidth(580);
 
     auto* outer = new QVBoxLayout(this);
     outer->setContentsMargins(12, 12, 12, 12);
@@ -35,18 +32,20 @@ RuntimeSetupDialog::RuntimeSetupDialog(const QString& gameId,
     outer->addWidget(hdr);
 
     auto* sub = new QLabel(
-        "Configure the emulator and content directories ASTra will use for this game.",
+        "Configure the emulator and content root directories ASTra will use for this game.\n"
+        "ASTra will automatically discover all AST and encrypted EDAT content "
+        "under the update root, including DLC subfolders.",
         this);
     sub->setWordWrap(true);
     sub->setStyleSheet("color: palette(mid);");
     outer->addWidget(sub);
 
-    // ── Core settings form ────────────────────────────────────────────────────
+    // ── Core settings form ─────────────────────────────────────────────────────
     auto* form = new QFormLayout();
     form->setContentsMargins(0, 4, 0, 4);
     form->setSpacing(6);
 
-    // Platform (informational only — RPCS3 is the only supported target)
+    // Platform (informational)
     auto* platformLabel = new QLabel("RPCS3", this);
     platformLabel->setStyleSheet("font-weight: bold;");
     form->addRow("Platform:", platformLabel);
@@ -62,62 +61,41 @@ RuntimeSetupDialog::RuntimeSetupDialog(const QString& gameId,
     rpcs3Row->addWidget(btnBrowseRpcs3);
     form->addRow("RPCS3 Executable:", rpcs3Row);
 
-    // Base Game AST directory row
-    auto* astRow = new QHBoxLayout();
-    astRow->setSpacing(6);
-    m_astDirEdit = new QLineEdit(this);
-    m_astDirEdit->setPlaceholderText("Directory containing qkl_*.AST files (base game)\u2026");
-    auto* btnBrowseAst = new QPushButton("Browse\u2026", this);
-    btnBrowseAst->setFixedWidth(80);
-    astRow->addWidget(m_astDirEdit, 1);
-    astRow->addWidget(btnBrowseAst);
-    form->addRow("Base Game AST Dir:", astRow);
+    // Base Content Root row
+    auto* baseRow = new QHBoxLayout();
+    baseRow->setSpacing(6);
+    m_baseRootEdit = new QLineEdit(this);
+    m_baseRootEdit->setPlaceholderText(
+        "Base game content root (directory containing *.AST files)\u2026");
+    auto* btnBrowseBase = new QPushButton("Browse\u2026", this);
+    btnBrowseBase->setFixedWidth(80);
+    baseRow->addWidget(m_baseRootEdit, 1);
+    baseRow->addWidget(btnBrowseBase);
+    form->addRow("Base Content Root:", baseRow);
 
-    outer->addLayout(form);
-
-    // ── Phase 5A: Additional content roots ────────────────────────────────────
-    auto* extraGroup = new QGroupBox("Additional Content Roots (optional)", this);
-    auto* extraForm  = new QFormLayout(extraGroup);
-    extraForm->setContentsMargins(8, 8, 8, 8);
-    extraForm->setSpacing(6);
-
-    // Update root row
+    // Update Content Root row (optional)
     auto* updateRow = new QHBoxLayout();
     updateRow->setSpacing(6);
-    m_updateRootEdit = new QLineEdit(extraGroup);
-    m_updateRootEdit->setPlaceholderText("Directory containing update qkl_*.AST files (optional)\u2026");
-    auto* btnBrowseUpdate = new QPushButton("Browse\u2026", extraGroup);
+    m_updateRootEdit = new QLineEdit(this);
+    m_updateRootEdit->setPlaceholderText(
+        "Update content root (optional — ASTra scans recursively)\u2026");
+    auto* btnBrowseUpdate = new QPushButton("Browse\u2026", this);
     btnBrowseUpdate->setFixedWidth(80);
     updateRow->addWidget(m_updateRootEdit, 1);
     updateRow->addWidget(btnBrowseUpdate);
-    extraForm->addRow("Update Root:", updateRow);
+    form->addRow("Update Content Root:", updateRow);
 
-    // DLC roots list
+    outer->addLayout(form);
+
+    // ── DLC note ──────────────────────────────────────────────────────────────
     auto* dlcNote = new QLabel(
-        "Additional DLC or custom content roots that also contain qkl_*.AST files:",
-        extraGroup);
+        "DLC and patch content (e.g. DLC/CFBR_DLC_V19/, qkl_patch.ast) "
+        "is automatically discovered under the update root. "
+        "No explicit DLC folder configuration is needed.",
+        this);
     dlcNote->setWordWrap(true);
     dlcNote->setStyleSheet("color: palette(mid); font-size: small;");
-    extraForm->addRow(dlcNote);
-
-    m_dlcList = new QListWidget(extraGroup);
-    m_dlcList->setFixedHeight(80);
-    m_dlcList->setAlternatingRowColors(true);
-    extraForm->addRow("DLC Roots:", m_dlcList);
-
-    auto* dlcBtns = new QHBoxLayout();
-    dlcBtns->setSpacing(6);
-    auto* btnAddDlc = new QPushButton("Add\u2026", extraGroup);
-    btnAddDlc->setFixedWidth(72);
-    m_btnRemoveDlc = new QPushButton("Remove", extraGroup);
-    m_btnRemoveDlc->setFixedWidth(72);
-    m_btnRemoveDlc->setEnabled(false);
-    dlcBtns->addStretch(1);
-    dlcBtns->addWidget(btnAddDlc);
-    dlcBtns->addWidget(m_btnRemoveDlc);
-    extraForm->addRow(dlcBtns);
-
-    outer->addWidget(extraGroup);
+    outer->addWidget(dlcNote);
 
     // ── Validation status ─────────────────────────────────────────────────────
     m_statusArea = new QTextBrowser(this);
@@ -143,35 +121,26 @@ RuntimeSetupDialog::RuntimeSetupDialog(const QString& gameId,
         const auto existing = RuntimeTargetManager::load(gameId);
         if (existing.has_value()) {
             m_rpcs3Edit->setText(existing->rpcs3ExePath);
-            m_astDirEdit->setText(existing->astDirPath);
+            m_baseRootEdit->setText(existing->astDirPath);
 
-            // Restore content roots
+            // Restore update root if present
             for (const RuntimeContentRoot& cr : existing->contentRoots) {
                 if (cr.kind == RuntimeContentKind::Update) {
                     m_updateRootEdit->setText(cr.path);
-                } else {
-                    m_dlcRoots.append(cr);
-                    const QString label = cr.displayName.isEmpty()
-                        ? runtimeContentKindLabel(cr.kind) + ": " + cr.path
-                        : cr.displayName + "  [" + cr.path + "]";
-                    m_dlcList->addItem(label);
+                    break;
                 }
             }
+            // Note: old DLC roots from the config are not shown (Phase 6A removes DLC UI),
+            // but they are preserved in the JSON — the new save will drop them.
         }
     }
 
     // ── Connections ───────────────────────────────────────────────────────────
-    connect(btnBrowseRpcs3,   &QPushButton::clicked, this, &RuntimeSetupDialog::onBrowseRpcs3);
-    connect(btnBrowseAst,     &QPushButton::clicked, this, &RuntimeSetupDialog::onBrowseAstDir);
-    connect(btnBrowseUpdate,  &QPushButton::clicked, this, &RuntimeSetupDialog::onBrowseUpdateRoot);
-    connect(btnAddDlc,        &QPushButton::clicked, this, &RuntimeSetupDialog::onAddDlcRoot);
-    connect(m_btnRemoveDlc,   &QPushButton::clicked, this, &RuntimeSetupDialog::onRemoveDlcRoot);
-    connect(m_btnSave,        &QPushButton::clicked, this, &RuntimeSetupDialog::onValidateAndSave);
-    connect(btnCancel,        &QPushButton::clicked, this, &QDialog::reject);
-
-    connect(m_dlcList, &QListWidget::currentRowChanged, this, [this](int row) {
-        m_btnRemoveDlc->setEnabled(row >= 0);
-    });
+    connect(btnBrowseRpcs3,  &QPushButton::clicked, this, &RuntimeSetupDialog::onBrowseRpcs3);
+    connect(btnBrowseBase,   &QPushButton::clicked, this, &RuntimeSetupDialog::onBrowseBaseRoot);
+    connect(btnBrowseUpdate, &QPushButton::clicked, this, &RuntimeSetupDialog::onBrowseUpdateRoot);
+    connect(m_btnSave,       &QPushButton::clicked, this, &RuntimeSetupDialog::onValidateAndSave);
+    connect(btnCancel,       &QPushButton::clicked, this, &QDialog::reject);
 }
 
 void RuntimeSetupDialog::onBrowseRpcs3() {
@@ -186,22 +155,22 @@ void RuntimeSetupDialog::onBrowseRpcs3() {
         m_rpcs3Edit->setText(QDir::toNativeSeparators(path));
 }
 
-void RuntimeSetupDialog::onBrowseAstDir() {
+void RuntimeSetupDialog::onBrowseBaseRoot() {
     const QString path = QFileDialog::getExistingDirectory(
         this,
-        "Select Base Game AST Directory",
-        m_astDirEdit->text().isEmpty()
+        "Select Base Content Root Directory",
+        m_baseRootEdit->text().isEmpty()
             ? QDir::homePath()
-            : m_astDirEdit->text(),
+            : m_baseRootEdit->text(),
         QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks);
     if (!path.isEmpty())
-        m_astDirEdit->setText(QDir::toNativeSeparators(path));
+        m_baseRootEdit->setText(QDir::toNativeSeparators(path));
 }
 
 void RuntimeSetupDialog::onBrowseUpdateRoot() {
     const QString path = QFileDialog::getExistingDirectory(
         this,
-        "Select Update Root Directory",
+        "Select Update Content Root Directory",
         m_updateRootEdit->text().isEmpty()
             ? QDir::homePath()
             : m_updateRootEdit->text(),
@@ -210,66 +179,22 @@ void RuntimeSetupDialog::onBrowseUpdateRoot() {
         m_updateRootEdit->setText(QDir::toNativeSeparators(path));
 }
 
-void RuntimeSetupDialog::onAddDlcRoot() {
-    // Ask user to select a directory
-    const QString path = QFileDialog::getExistingDirectory(
-        this,
-        "Select DLC / Custom Content Root Directory",
-        QDir::homePath(),
-        QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks);
-    if (path.isEmpty()) return;
-
-    // Ask for a display name (optional)
-    bool ok = false;
-    const QString name = QInputDialog::getText(
-        this,
-        "DLC Root Display Name",
-        "Enter a short label for this content root (optional):",
-        QLineEdit::Normal,
-        QString(),
-        &ok);
-    if (!ok) return; // user cancelled
-
-    RuntimeContentRoot cr;
-    cr.kind        = RuntimeContentKind::Dlc;
-    cr.path        = QDir::toNativeSeparators(path);
-    cr.displayName = name.trimmed();
-
-    m_dlcRoots.append(cr);
-
-    const QString label = cr.displayName.isEmpty()
-        ? cr.path
-        : cr.displayName + "  [" + cr.path + "]";
-    m_dlcList->addItem(label);
-}
-
-void RuntimeSetupDialog::onRemoveDlcRoot() {
-    const int row = m_dlcList->currentRow();
-    if (row < 0 || row >= m_dlcRoots.size()) return;
-
-    delete m_dlcList->takeItem(row);
-    m_dlcRoots.removeAt(row);
-    m_btnRemoveDlc->setEnabled(m_dlcList->currentRow() >= 0);
-}
-
 void RuntimeSetupDialog::onValidateAndSave() {
     RuntimeTargetConfig cfg;
     cfg.gameId       = m_gameId;
     cfg.platform     = RuntimePlatform::RPCS3;
     cfg.rpcs3ExePath = m_rpcs3Edit->text().trimmed();
-    cfg.astDirPath   = m_astDirEdit->text().trimmed();
+    cfg.astDirPath   = m_baseRootEdit->text().trimmed();
     cfg.configuredAt = QDateTime::currentDateTimeUtc().toString(Qt::ISODate);
 
-    // Phase 5A: build content roots from update root + DLC list.
+    // Phase 6A: build content roots from update root only.
+    // DLC roots are no longer configured via the UI.
     const QString updatePath = m_updateRootEdit->text().trimmed();
     if (!updatePath.isEmpty()) {
         RuntimeContentRoot cr;
         cr.kind        = RuntimeContentKind::Update;
         cr.path        = updatePath;
         cr.displayName = "Update";
-        cfg.contentRoots.append(cr);
-    }
-    for (const RuntimeContentRoot& cr : m_dlcRoots) {
         cfg.contentRoots.append(cr);
     }
 

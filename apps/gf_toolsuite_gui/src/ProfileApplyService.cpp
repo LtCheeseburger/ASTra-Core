@@ -104,6 +104,11 @@ ProfileApplyResult ProfileApplyService::apply(const ModProfile&          profile
                         : entry.destRootPath;
                     const QString liveFile   = QDir(destRoot).filePath(entry.filename);
                     const QString backupFile = QDir(backupDir).filePath(entry.filename);
+                    // Phase 6A: create subdirectory for nested relPaths
+                    {
+                        const QString backupParent = QFileInfo(backupFile).absolutePath();
+                        if (!QDir(backupParent).exists()) QDir().mkpath(backupParent);
+                    }
                     if (QFile::exists(liveFile) && !QFile::exists(backupFile)) {
                         if (QFile::copy(liveFile, backupFile))
                             ++backupCount;
@@ -159,6 +164,19 @@ ProfileApplyResult ProfileApplyService::apply(const ModProfile&          profile
             : entry.destRootPath;
         const QString destPath = QDir(destRootDir).filePath(entry.filename);
         const QString tmpPath  = destPath + ".astra_tmp";
+
+        // Phase 6A: ensure parent directory exists for files with nested relPaths
+        // (e.g. DLC/CFBR_DLC_V19/qkl_dlc.AST under the update root).
+        const QString parentDir = QFileInfo(destPath).absolutePath();
+        if (!QDir(parentDir).exists() && !QDir().mkpath(parentDir)) {
+            if (progress) { progress->setValue(resolved.files.size()); delete progress; }
+            result.errors << QString("Cannot create destination directory: %1").arg(parentDir);
+            result.message = "Apply aborted: " + result.errors.last();
+            gf::core::logError(gf::core::LogCategory::FileIO,
+                               "ProfileApplyService: mkpath failed",
+                               parentDir.toStdString());
+            return result;
+        }
 
         // Clean up any leftover temp from a previously-aborted apply.
         if (QFile::exists(tmpPath)) QFile::remove(tmpPath);

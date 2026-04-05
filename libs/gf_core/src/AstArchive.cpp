@@ -519,9 +519,16 @@ MagicHint sniffMagic(const std::array<std::uint8_t, 16>& b) {
   if (b[0] == 'D' && b[1] == 'B') return {"DB", ".db"};
   if (b[0] == 'T' && b[1] == 'e' && b[2] == 'x' && b[3] == 't') return {"TXT", ".txt"};
   if (b[0] == 0x89 && b[1] == 'P' && b[2] == 'N' && b[3] == 'G') return {"PNG", ".png"};
+  if (b[0] == 'S' && b[1] == 'B' && b[2] == 'K' && b[3] == 'R') return {"SBK", ".sbkr"};
+  if (b[0] == 'S' && b[1] == 'B' && b[2] == 'b' && b[3] == 'e') return {"SBB", ".sbbe"};
   if (b[0] == 'O' && b[1] == 'g' && b[2] == 'g' && b[3] == 'S') return {"OGG", ".ogg"};
   if (b[0] == 'R' && b[1] == 'I' && b[2] == 'F' && b[3] == 'F') return {"RIFF", ".riff"};
   if (b[0] == 'B' && b[1] == 'G' && b[2] == 'F' && b[3] == 'A') return {"AST/BGFA", ".ast"};
+  // EA VP6 container: "MVhd" at offset 0, "vp6" at offset 8 (payload codec id)
+  if (b[0] == 'M' && b[1] == 'V' && b[2] == 'h' && b[3] == 'd' &&
+      b[8] == 'v' && b[9] == 'p' && b[10] == '6') return {"VP6", ".vp6"};
+  // ISO Base Media (MP4/MOV/M4V): "ftyp" box at offset 4
+  if (b[4] == 'f' && b[5] == 't' && b[6] == 'y' && b[7] == 'p') return {"MP4", ".mp4"};
   if (b[0] == 'X' && b[1] == 'P' && b[2] == 'R' && b[3] == '2') return {"XPR2", ".xpr2"};
   if (b[0] == 'X' && b[1] == 'P' && b[2] == 'R' && b[3] == 0x00) return {"XPR", ".xpr"};
 // XML / markup: allow UTF-8 BOM and leading whitespace, and common UTF-16LE markup.

@@ -53,17 +53,15 @@ private slots:
   void onManageProfiles();
   void onInstallMod();
   void onShowInstalledMods();
-  void onConfigureRuntime();
   void onCreateBaseline();
   void onExportPackage();
   void onEditPackageMetadata();
   void onApplyProfile();
-  void onApplyAndLaunch();
-  void onLaunch();
   void onAbout();
   void onBetaTestingGuide();
   void onCheckForUpdates();
   void onStartupUpdateCheck();
+  void onSidePanelActivateProfile(QListWidgetItem* item);
 
 private:
   void buildUi();
@@ -74,6 +72,7 @@ private:
   void exportLibraryJson();
   void importLibraryJson();
   void updateCandidatePickers();
+  void refreshSidePanel();
 
   GameLibrary* m_library = nullptr;
   GameIconProvider* m_icons = nullptr;
@@ -96,21 +95,19 @@ private:
   QPushButton* m_btnRemoveGame = nullptr;
   QPushButton* m_btnOpenGameFiles = nullptr;
 
-  // Selected-game / mod-profile panel (below the list)
-  class QFrame* m_profilePanel    = nullptr;
-  QLabel*       m_ppGameLabel     = nullptr;   // current game name
-  QLabel*       m_ppProfileLabel  = nullptr;   // active profile status
-  QPushButton*  m_ppManageBtn          = nullptr;   // "Manage Profiles…"
-  QPushButton*  m_ppInstallBtn         = nullptr;   // "Install Mod…"
-  QPushButton*  m_ppBrowseBtn          = nullptr;   // "Installed Mods…"
-  QPushButton*  m_ppConfigureRuntimeBtn  = nullptr;  // "Configure Runtime…"
-  QPushButton*  m_ppCreateBaselineBtn   = nullptr;  // "Create Baseline…"
-  QPushButton*  m_ppExportBtn           = nullptr;  // "Export Package…"
-  QPushButton*  m_ppEditMetadataBtn     = nullptr;  // "Edit Package Metadata…"
-  QPushButton*  m_ppApplyBtn            = nullptr;  // "Apply Profile"
-  QPushButton*  m_ppApplyLaunchBtn      = nullptr;  // "Apply & Launch"
-  QPushButton*  m_ppLaunchBtn           = nullptr;  // "Launch"
-  QLabel*       m_ppDeployStatusLabel   = nullptr;  // Deployment status indicator
+  // Side panel — slides in when a game is selected
+  class QFrame* m_sidePanel          = nullptr;
+  QLabel*       m_spGameLabel        = nullptr;  // selected game title
+  QLabel*       m_spMetaLabel        = nullptr;  // platform · AST count
+  QListWidget*  m_spProfileList      = nullptr;  // inline profile list
+  QPushButton*  m_spProfilesBtn      = nullptr;  // "Manage…" → ModProfilesDialog
+  QPushButton*  m_spApplyBtn         = nullptr;  // "Apply Profile"
+  QPushButton*  m_spInstallBtn       = nullptr;  // "Install Mod…"
+  QPushButton*  m_spInstalledBtn     = nullptr;  // "Installed Mods…"
+  QPushButton*  m_spExportBtn        = nullptr;  // "Export Package…"
+  // Tools-menu actions that need selection-state enable/disable
+  QAction*      m_actCreateBaseline  = nullptr;
+  QAction*      m_actEditMetadata    = nullptr;
 
   // v0.5.2: Tool hub / modules
   QListWidget* m_modules = nullptr;

@@ -52,6 +52,8 @@ static ModProfile profileFromJson(const QJsonObject& o) {
     p.isBaseline    = o.value("is_baseline").toBool(false);
     p.baselineType  = static_cast<BaselineType>(
         o.value("baseline_type").toInt(static_cast<int>(BaselineType::Custom)));
+    // Phase 7: copy-based workspace (optional — empty for pre-Phase-7 profiles)
+    p.sourcePath    = o.value("source_path").toString();
     return p;
 }
 
@@ -67,6 +69,9 @@ static QJsonObject profileToJson(const ModProfile& p) {
     // Phase 4A: baseline fields
     o["is_baseline"]    = p.isBaseline;
     o["baseline_type"]  = static_cast<int>(p.baselineType);
+    // Phase 7: copy-based workspace (omit key when empty to keep old JSON clean)
+    if (!p.sourcePath.isEmpty())
+        o["source_path"] = p.sourcePath;
     return o;
 }
 

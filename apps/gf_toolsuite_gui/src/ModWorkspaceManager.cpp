@@ -34,6 +34,7 @@ QStringList ModWorkspaceManager::requiredDirectories(const WorkspaceLayout& layo
         layout.overlayRsfDir(),
         layout.overlayTexturesDir(),
         layout.overlayTextDir(),
+        layout.gameCopyDir(),   // Phase 7: copy-based editing sandbox
         layout.buildDir(),
         layout.tempDir(),
         layout.logsDir(),

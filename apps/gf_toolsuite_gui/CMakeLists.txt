@@ -63,6 +63,18 @@ set(GF_TOOLS_GUI_SOURCES
   src/DeploymentStateStore.cpp
   src/DriftDetector.cpp
   src/LaunchService.cpp
+  # Phase 6
+  src/ModUninstallService.cpp
+  src/ProfileCloneService.cpp
+  src/ApplyPreviewDialog.cpp
+  src/NewProfileDialog.cpp
+  src/MediaImportDialog.cpp
+  # Phase 7: copy-based profile workspaces
+  src/ProfileWorkspaceBuilder.cpp
+  # Phase 3B: audio browser
+  src/AudioPlayer.cpp
+  src/WaveformWidget.cpp
+  src/AudioBrowserPanel.cpp
 )
 
 set(GF_TOOLS_GUI_HEADERS
@@ -127,6 +139,19 @@ set(GF_TOOLS_GUI_HEADERS
   src/DeploymentStateStore.hpp
   src/DriftDetector.hpp
   src/LaunchService.hpp
+  # Phase 6
+  src/ContentRootDiscovery.hpp
+  src/ModUninstallService.hpp
+  src/ProfileCloneService.hpp
+  src/ApplyPreviewDialog.hpp
+  src/NewProfileDialog.hpp
+  src/MediaImportDialog.hpp
+  # Phase 7: copy-based profile workspaces
+  src/ProfileWorkspaceBuilder.hpp
+  # Phase 3B: audio browser
+  src/AudioPlayer.hpp
+  src/WaveformWidget.hpp
+  src/AudioBrowserPanel.hpp
 )
 
 set(GF_TOOLS_GUI_RESOURCES
@@ -149,6 +174,7 @@ if (WIN32)
 endif()
 
 target_include_directories(gf_toolsuite_gui PRIVATE
+  ${CMAKE_SOURCE_DIR}/libs/gf_audio/include
   ${CMAKE_SOURCE_DIR}/libs/gf_core/include
   ${CMAKE_SOURCE_DIR}/libs/gf_models/include
   ${CMAKE_SOURCE_DIR}/libs/gf_apt/include
@@ -159,12 +185,14 @@ target_include_directories(gf_toolsuite_gui PRIVATE
 
 target_link_libraries(gf_toolsuite_gui PRIVATE
   Qt6::Core Qt6::Gui Qt6::Widgets Qt6::Concurrent Qt6::Network
+  gf_audio
   gf_core
   gf_models
   gf_platform_ps3
   gf_textures
   gf_apt
   gf_dat
+  winmm   # WinMM audio (waveOut API) for AudioPlayer
 )
 
 # Warnings (from root cmake/gf_warnings.cmake)

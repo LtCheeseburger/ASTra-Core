@@ -297,6 +297,28 @@ bool ModProfileManager::markAsBaseline(const ModProfileId& id,
     return false;
 }
 
+bool ModProfileManager::updateProfile(const ModProfile& updated, QString* outErr) {
+    for (auto& p : m_profiles) {
+        if (p.id != updated.id) continue;
+
+        // Update only the mutable fields; never overwrite immutable identity fields.
+        p.name        = updated.name.trimmed().isEmpty() ? p.name : updated.name.trimmed();
+        p.description = updated.description;
+        p.sourcePath  = updated.sourcePath;
+        p.updatedAt   = nowUtcIso();
+
+        if (!persist(outErr)) return false;
+        m_store.writeProfileJson(p, nullptr); // best-effort per-workspace copy
+
+        gf::core::logInfo(gf::core::LogCategory::General,
+                          "ModProfileManager: profile updated",
+                          p.id.toStdString());
+        return true;
+    }
+    if (outErr) *outErr = QString("Profile not found: %1").arg(updated.id);
+    return false;
+}
+
 // ── Private ───────────────────────────────────────────────────────────────────
 
 bool ModProfileManager::persist(QString* outErr) {

@@ -52,6 +52,10 @@ enum class FileKind {
 
   // ── Generic image ────────────────────────────────────────────────────────
   ImageGeneric,   // PNG / BMP / TGA / JPG — recognised by magic but no editor
+
+  // ── EA audio formats ─────────────────────────────────────────────────────
+  Sbkr,           // EA SBKR sound-bank descriptor ("SBKR" magic)
+  Sbbe,           // EA SBbe sample container ("SBbe" magic)
 };
 
 // ── Confidence levels ─────────────────────────────────────────────────────────
@@ -68,6 +72,7 @@ inline constexpr std::string_view kViewerTexture   = "texture";
 inline constexpr std::string_view kViewerApt       = "apt";
 inline constexpr std::string_view kViewerDat       = "dat";
 inline constexpr std::string_view kViewerRsf       = "rsf";
+inline constexpr std::string_view kViewerAudio     = "audio";
 inline constexpr std::string_view kViewerInspector = "inspector";
 
 // ── Detection result ──────────────────────────────────────────────────────────

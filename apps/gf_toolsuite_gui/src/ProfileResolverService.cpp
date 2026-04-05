@@ -1,4 +1,5 @@
 #include "ProfileResolverService.hpp"
+#include "ContentRootDiscovery.hpp"
 #include "ModRegistryStore.hpp"
 #include "ModWorkspaceManager.hpp"
 
@@ -14,17 +15,33 @@
 
 namespace gf::gui {
 
-// Phase 5B: map a layer prefix in a mod relPath to the live dest root directory.
-// "base/" and no prefix → "" (use runtime.astDirPath, legacy-compat).
-// "update/" / "dlc/" / "custom_dlc/" → first matching RuntimeContentRoot.path.
-static QString destRootFromLayerPrefix(const QString&             relPath,
-                                        const RuntimeTargetConfig& runtime) {
-    if (!relPath.contains('/'))
-        return {}; // flat layout, no prefix → base root
+// Phase 6A: Decompose a mod's installed relPath (e.g. "update/DLC/CFBR/qkl_dlc.AST")
+// into the live dest root path and the relative path within that root.
+//
+// "base/<rest>"       → destRoot = ""              relPath = <rest>
+// "update/<rest>"     → destRoot = update root     relPath = <rest>
+// "dlc/<rest>"        → destRoot = dlc root        relPath = <rest>
+// "custom_dlc/<rest>" → destRoot = custom_dlc root relPath = <rest>
+// "<flat>"            → destRoot = ""              relPath = <flat>   (no prefix)
+// unknown prefix      → destRoot = ""              relPath = original (safe fallback)
+struct LayerDecomposition {
+    QString destRoot; // empty = use runtime.astDirPath
+    QString relPath;  // relative path within the dest root (may contain subdirs)
+};
 
-    const QString prefix = relPath.section('/', 0, 0).toLower();
+static LayerDecomposition layerDecompose(const QString&             installedRelPath,
+                                          const RuntimeTargetConfig& runtime)
+{
+    if (!installedRelPath.contains(QLatin1Char('/'))) {
+        // Flat filename — no layer prefix, route to base root
+        return {QString(), installedRelPath};
+    }
+
+    const QString prefix  = installedRelPath.section(QLatin1Char('/'), 0, 0).toLower();
+    const QString theRest = installedRelPath.section(QLatin1Char('/'), 1); // strip prefix
+
     if (prefix == QLatin1String("base"))
-        return {}; // explicit base prefix → base root
+        return {QString(), theRest};
 
     RuntimeContentKind target = RuntimeContentKind::BaseGame;
     if (prefix == QLatin1String("update"))
@@ -34,12 +51,12 @@ static QString destRootFromLayerPrefix(const QString&             relPath,
     else if (prefix == QLatin1String("custom_dlc"))
         target = RuntimeContentKind::CustomDlc;
     else
-        return {}; // unknown prefix → base root (safe fallback)
+        return {QString(), installedRelPath}; // unknown prefix → base (safe)
 
     for (const RuntimeContentRoot& cr : runtime.contentRoots)
-        if (cr.kind == target) return cr.path;
+        if (cr.kind == target) return {cr.path, theRest};
 
-    return {}; // layer not configured → base root fallback
+    return {QString(), installedRelPath}; // unconfigured layer → base fallback
 }
 
 // static
@@ -57,33 +74,35 @@ ProfileResolvedMap ProfileResolverService::resolve(const ModProfile&          pr
 
     const WorkspaceLayout layout = WorkspaceLayout::from(profile.workspacePath);
 
-    // Internal lookup tables (upper-case filename → index into result.files).
-    // Used for conflict detection and for updating entries in-place when a mod
-    // overrides a baseline file.
-    QMap<QString, int>     keyToIdx;   // uppercase filename → result.files index
-    QMap<QString, QString> providedBy; // uppercase filename → "baseline" | modName
+    // Conflict-detection maps.
+    // Key = (destRoot + "|" + relPath).toUpper() — distinguishes same filename
+    // in different roots while still allowing one mod to override the baseline.
+    QMap<QString, int>     keyToIdx;   // composite key → result.files index
+    QMap<QString, QString> providedBy; // composite key → "baseline" | modName
 
-    // ── 1. Seed from baseline AST directory ───────────────────────────────────
-    // Base game files go to runtime.astDirPath (destRootPath empty = legacy compat).
+    auto makeKey = [](const QString& destRoot, const QString& relPath) -> QString {
+        // Use empty-or-path as root distinguisher
+        return (destRoot.isEmpty() ? QStringLiteral("__base__") : destRoot)
+               + QLatin1Char('|')
+               + relPath.toUpper();
+    };
+
+    // ── 1. Seed from base overlay (overlay/ast/) ───────────────────────────────
+    // Phase 6A: scan *.ast / *.AST — no qkl_* prefix restriction
     const QDir baselineDir(layout.overlayAstDir());
     if (baselineDir.exists()) {
-        const QStringList baseFiles = baselineDir.entryList(
-            {"qkl_*.AST", "qkl_*.ast"}, QDir::Files, QDir::Name);
+        const QStringList baseFiles = discoverBaseAstFiles(baselineDir);
         for (const QString& f : baseFiles) {
-            const QString key = f.toUpper();
-            // destRootPath left empty → ProfileApplyService uses runtime.astDirPath (legacy compat)
+            const QString key = makeKey(QString(), f);
             result.files.append({f, baselineDir.filePath(f), QStringLiteral("baseline"), {}});
             keyToIdx.insert(key, result.files.size() - 1);
             providedBy.insert(key, QStringLiteral("baseline"));
         }
     }
-    // An empty baseline is valid — the profile may consist of mods only.
 
-    // ── 1b. Phase 5A: seed additional roots from roots_manifest.json ──────────
-    // When captureFromRuntime() captured multiple roots, each root's files are
-    // stored in overlay/roots/<index>/ and its live destination is in the manifest.
-    // Higher-priority roots (update > base) are listed later in the manifest and
-    // overwrite earlier entries, preserving their destRootPath.
+    // ── 1b. Seed additional roots from roots_manifest.json ────────────────────
+    // Phase 6A: recursively scan each root overlay directory so that files
+    // captured from subfolders (DLC/...) are included with their relative paths.
     const QString manifestPath = layout.rootsManifestPath();
     if (QFile::exists(manifestPath)) {
         QFile mf(manifestPath);
@@ -99,17 +118,18 @@ ProfileResolvedMap ProfileResolverService::resolve(const ModProfile&          pr
                 const QDir rootDir(layout.overlayRootDir(idx));
                 if (!rootDir.exists()) continue;
 
-                const QStringList rootFiles = rootDir.entryList(
-                    {"qkl_*.AST", "qkl_*.ast"}, QDir::Files, QDir::Name);
-                for (const QString& f : rootFiles) {
-                    const QString key = f.toUpper();
+                // Phase 6A: recursive discovery preserves nested relPaths
+                QVector<QPair<QString,QString>> rootFiles;
+                discoverAstFilesRecursive(rootDir, QString(), rootFiles);
+
+                for (const auto& [relPath, absPath] : rootFiles) {
+                    const QString key = makeKey(live, relPath);
                     if (keyToIdx.contains(key)) {
-                        // Overwrite source and destination from this higher-priority root.
-                        result.files[keyToIdx.value(key)].sourcePath   = rootDir.filePath(f);
+                        // Update root overrides base root for the same relPath
+                        result.files[keyToIdx.value(key)].sourcePath   = absPath;
                         result.files[keyToIdx.value(key)].destRootPath = live;
-                        // providedBy stays "baseline" (still original content, just different root)
                     } else {
-                        result.files.append({f, rootDir.filePath(f), QStringLiteral("baseline"), live});
+                        result.files.append({relPath, absPath, QStringLiteral("baseline"), live});
                         keyToIdx.insert(key, result.files.size() - 1);
                         providedBy.insert(key, QStringLiteral("baseline"));
                     }
@@ -127,7 +147,6 @@ ProfileResolvedMap ProfileResolverService::resolve(const ModProfile&          pr
     QVector<InstalledModRecord> records;
     QString regErr;
     if (!store.load(profile.workspacePath, records, &regErr)) {
-        // Non-fatal: missing registry means no mods installed yet.
         gf::core::logWarn(gf::core::LogCategory::General,
                           "ProfileResolverService: registry load failed (treating as empty)",
                           regErr.toStdString());
@@ -141,29 +160,29 @@ ProfileResolvedMap ProfileResolverService::resolve(const ModProfile&          pr
     for (const InstalledModRecord& rec : records) {
         if (!rec.enabled) continue;
 
-        // The install slot layout: <workspace>/mods/installed/<modId>-<installId>/files/
         const QString slotFilesDir =
             QDir(layout.modsInstalledDir()).filePath(
                 rec.modId + "-" + rec.installId + "/files");
 
-        for (const QString& relPath : rec.installedFiles) {
-            const QString fname      = QFileInfo(relPath).fileName();
-            const QString fnameUpper = fname.toUpper();
+        for (const QString& installedRelPath : rec.installedFiles) {
+            // Phase 6A: decompose into dest root + relPath within that root
+            const LayerDecomposition decomp = layerDecompose(installedRelPath, runtime);
+            const QString& modRelPath = decomp.relPath;
 
-            // Only process AST files — other payload types are not resolved here.
-            if (!fnameUpper.endsWith(".AST")) continue;
+            // Phase 6A: filter by extension on the final filename component
+            const QString plainName = QFileInfo(modRelPath).fileName().toUpper();
+            if (!plainName.endsWith(QStringLiteral(".AST")) &&
+                !plainName.endsWith(QStringLiteral(".AST.EDAT")))
+                continue;
 
-            const QString absPath = QDir(slotFilesDir).filePath(relPath);
-            const QString prevPro = providedBy.value(fnameUpper);
+            const QString absPath = QDir(slotFilesDir).filePath(installedRelPath);
+            const QString key     = makeKey(decomp.destRoot, modRelPath);
+            const QString prevPro = providedBy.value(key);
 
-            // Phase 5B: if the relPath has a known layer prefix (base/, update/, dlc/,
-            // custom_dlc/), resolve it to the matching live root directory.
-            const QString modDestRoot = destRootFromLayerPrefix(relPath, runtime);
-
-            // Phase 5E: warn once per (mod, layer) when a non-base layer is requested
-            // but no matching runtime content root is configured.
-            if (modDestRoot.isEmpty() && relPath.contains('/')) {
-                const QString prefix = relPath.section('/', 0, 0).toLower();
+            // Phase 5E/6A: warn once per (mod, layer) when a non-base layer is
+            // requested but no matching runtime content root is configured.
+            if (decomp.destRoot.isEmpty() && installedRelPath.contains(QLatin1Char('/'))) {
+                const QString prefix = installedRelPath.section(QLatin1Char('/'), 0, 0).toLower();
                 if (prefix == QLatin1String("update") ||
                     prefix == QLatin1String("dlc")    ||
                     prefix == QLatin1String("custom_dlc")) {
@@ -179,35 +198,29 @@ ProfileResolvedMap ProfileResolverService::resolve(const ModProfile&          pr
             }
 
             if (prevPro.isEmpty()) {
-                // File not in baseline and not yet provided by any mod — add it.
-                result.files.append({fname, absPath, rec.modName, modDestRoot});
-                keyToIdx.insert(fnameUpper, result.files.size() - 1);
-                providedBy.insert(fnameUpper, rec.modName);
+                // New file not in baseline — add it
+                result.files.append({modRelPath, absPath, rec.modName, decomp.destRoot});
+                keyToIdx.insert(key, result.files.size() - 1);
+                providedBy.insert(key, rec.modName);
 
             } else if (prevPro == QLatin1String("baseline")) {
-                // Mod overrides a baseline entry — update source in-place.
-                result.files[keyToIdx.value(fnameUpper)].sourcePath = absPath;
-                result.files[keyToIdx.value(fnameUpper)].providedBy  = rec.modName;
-                // If the mod carries an explicit layer prefix, respect it (it may differ
-                // from the seeded baseline destRootPath — e.g. a base-game file being
-                // redirected to an update root by a layered package).
-                // If no layer prefix (flat or "base/"), preserve the baseline's destRootPath.
-                if (!modDestRoot.isEmpty())
-                    result.files[keyToIdx.value(fnameUpper)].destRootPath = modDestRoot;
-                providedBy.insert(fnameUpper, rec.modName);
+                // Mod overrides baseline — update source
+                result.files[keyToIdx.value(key)].sourcePath = absPath;
+                result.files[keyToIdx.value(key)].providedBy  = rec.modName;
+                if (!decomp.destRoot.isEmpty())
+                    result.files[keyToIdx.value(key)].destRootPath = decomp.destRoot;
+                providedBy.insert(key, rec.modName);
 
             } else {
-                // Two enabled mods both supply the same filename — hard conflict.
+                // Two enabled mods provide the same file — hard conflict
                 result.errors << QString(
                     "Conflict: \"%1\" is provided by both \"%2\" and \"%3\". "
                     "Disable one of these mods before applying the profile.")
-                    .arg(fname, prevPro, rec.modName);
+                    .arg(modRelPath, prevPro, rec.modName);
             }
         }
     }
 
-    // If any conflicts were detected, clear files so callers cannot accidentally
-    // proceed with a partial map.
     if (!result.errors.isEmpty()) {
         result.files.clear();
         if (outErr) *outErr = result.errors.first();

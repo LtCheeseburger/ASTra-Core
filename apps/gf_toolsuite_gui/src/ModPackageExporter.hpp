@@ -46,8 +46,8 @@ private:
                                 const RuntimeTargetConfig& runtime);
 
     // Writes astra_mod.json into packageDir.
+    // payload_files is intentionally omitted — the installer scans files/ at install time.
     static bool writeManifest(const ModExportSpec& spec,
-                               const QStringList&   payloadFiles,
                                const QString&       packageDir,
                                QString*             outErr);
 };

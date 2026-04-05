@@ -1,5 +1,6 @@
 #include "ProfileContextService.hpp"
 #include "ModProfileManager.hpp"
+#include "ProfileWorkspaceBuilder.hpp"
 
 namespace gf::gui {
 
@@ -35,6 +36,17 @@ std::optional<ModProfile> ProfileContextService::activeProfile() const {
 
 bool ProfileContextService::hasActiveProfile() const {
     return activeProfile().has_value();
+}
+
+QString ProfileContextService::editContentRoot() const {
+    const auto profile = activeProfile();
+    if (!profile) return {};
+    if (!ProfileWorkspaceBuilder::isGameCopyPopulated(*profile)) return {};
+    return ProfileWorkspaceBuilder::gameCopyPath(*profile);
+}
+
+bool ProfileContextService::isEditingProfileCopy() const {
+    return !editContentRoot().isEmpty();
 }
 
 void ProfileContextService::onManagerActiveProfileChanged(const QString& gameId,

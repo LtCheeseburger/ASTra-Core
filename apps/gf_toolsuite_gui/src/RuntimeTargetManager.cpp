@@ -10,7 +10,6 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
-#include <QSet>
 
 #include <filesystem>
 
@@ -168,49 +167,40 @@ bool RuntimeTargetManager::validate(const RuntimeTargetConfig& config,
                        .arg(config.rpcs3ExePath);
     }
 
-    // AST directory
+    // Phase 6A: base content root (flat *.ast / *.AST files — no qkl_ prefix required)
     if (config.astDirPath.isEmpty()) {
-        errors << "AST directory path is empty.";
+        errors << "Base content root path is empty.";
     } else {
-        const QDir astDir(config.astDirPath);
-        if (!astDir.exists()) {
-            errors << QString("AST directory does not exist: %1").arg(config.astDirPath);
+        const QDir baseDir(config.astDirPath);
+        if (!baseDir.exists()) {
+            errors << QString("Base content root does not exist: %1").arg(config.astDirPath);
         } else {
-            // Count qkl_*.AST files (case-insensitive on Windows, but Qt glob is case-sensitive)
-            const QStringList astFiles = astDir.entryList(
-                {"qkl_*.AST", "qkl_*.ast"}, QDir::Files);
+            const QStringList astFiles = baseDir.entryList(
+                {"*.ast", "*.AST"}, QDir::Files);
             if (astFiles.size() < kMinAstFiles) {
                 errors << QString(
-                    "AST directory contains only %1 qkl_*.AST file(s) "
+                    "Base content root contains only %1 *.ast file(s) "
                     "(expected at least %2). Is this the correct directory?")
                     .arg(astFiles.size()).arg(kMinAstFiles);
             }
         }
     }
 
-    // Phase 5E: validate optional content roots (update / DLC paths)
-    QSet<int> seenKinds;
+    // Phase 6A: validate optional content roots (update root only in new configs).
+    // Old configs may still have Dlc/CustomDlc entries — validate existence but
+    // do not enforce uniqueness or presence, since new configs only use Update.
     for (const RuntimeContentRoot& cr : config.contentRoots) {
+        const QString label = cr.displayName.isEmpty()
+            ? runtimeContentKindLabel(cr.kind)
+            : cr.displayName;
         if (cr.path.isEmpty()) {
-            const QString label = cr.displayName.isEmpty()
-                ? runtimeContentKindLabel(cr.kind)
-                : cr.displayName;
             errors << QString("Content root \"%1\" has an empty path.").arg(label);
             continue;
         }
         if (!QDir(cr.path).exists()) {
-            const QString label = cr.displayName.isEmpty()
-                ? runtimeContentKindLabel(cr.kind)
-                : cr.displayName;
             errors << QString("Content root \"%1\" path does not exist: %2")
                        .arg(label, cr.path);
         }
-        const int kindInt = static_cast<int>(cr.kind);
-        if (seenKinds.contains(kindInt)) {
-            errors << QString("Duplicate content root kind: %1")
-                       .arg(runtimeContentKindLabel(cr.kind));
-        }
-        seenKinds.insert(kindInt);
     }
 
     if (outErrors) *outErrors = errors;

@@ -20,6 +20,12 @@
 #include "gf/core/file_detection.hpp"
 #include "gf/core/AstContainerEditor.hpp"
 #include "gf/core/safe_write.hpp"
+#include "gf/media/media_sniffer.hpp"
+#include "gf/media/media_exporter.hpp"
+#include "gf/media/ea_vp6_import_prep.hpp"
+#include "gf/media/ea_vp6_replacement_backend.hpp"
+#include "MediaImportDialog.hpp"
+#include "AudioBrowserPanel.hpp"
 
 #include <optional>
 #include <filesystem>
@@ -71,6 +77,7 @@
 #include <QFileDialog>
 #include <QStandardPaths>
 #include <QFile>
+#include <QTemporaryFile>
 #include <QDesktopServices>
 #include <QUrl>
 #include <QHash>
@@ -1535,21 +1542,23 @@ static QString deriveUiGroupFromExportBase(QString base) {
 }
 
 static QString classifyEmbeddedIndexKind(const gf::core::AstArchive::Index& idx) {
-  std::size_t tex = 0, ui = 0, audio = 0, models = 0, other = 0;
+  std::size_t tex = 0, ui = 0, audio = 0, models = 0, video = 0, other = 0;
   for (const auto& e : idx.entries) {
     const std::string t = e.type_hint;
     if (t == "DDS" || t == "P3R" || t == "XPR" || t == "XPR2") ++tex;
     else if (t == "APT" || t == "CONST" || t == "XML") ++ui;
     else if (t == "OGG" || t == "RIFF") ++audio;
     else if (t == "RSF" || t == "RSG" || t == "STRM") ++models;
+    else if (t == "VP6" || t == "MP4") ++video;
     else ++other;
   }
-  const std::size_t maxv = std::max({tex, ui, audio, models, other});
+  const std::size_t maxv = std::max({tex, ui, audio, models, video, other});
   if (maxv == 0) return "Misc";
   if (maxv == tex) return "Textures";
   if (maxv == ui) return "UI";
   if (maxv == audio) return "Audio";
   if (maxv == models) return "Models";
+  if (maxv == video) return "Videos";
   return "Misc";
 
 
@@ -1676,6 +1685,10 @@ void MainWindow::closeEvent(QCloseEvent* e) {
   // Persist friendly-name cache so derived AST names survive reopen even if
   // they were learned during this session and no explicit save path was hit.
   m_nameCache.save();
+  if (!m_audioTempFilePath.isEmpty()) {
+    QFile::remove(m_audioTempFilePath);
+    m_audioTempFilePath.clear();
+  }
   e->accept();
 }
 
@@ -2132,6 +2145,12 @@ void MainWindow::openStandaloneAst(const QString& astPath) {
   updateStatusSelection(root);
   showViewerForItem(root);
   updateDocumentActions();
+
+  // Auto-populate audio browser with files from the same directory (Phase 3B).
+  if (m_audioBrowser) {
+    const QString dir = QFileInfo(astPath).absolutePath();
+    m_audioBrowser->scan(dir);
+  }
 }
 
 void MainWindow::openGame(const QString& displayName,
@@ -2169,7 +2188,19 @@ void MainWindow::openGame(const QString& displayName,
   if (m_actUndoLastReplace) m_actUndoLastReplace->setEnabled(false);
   setDirty(false);
   updateStatusSelection(nullptr);
-  startIndexing(displayName, rootPath, baseContentDir, updateContentDir);
+
+  // Phase 7: if a profile with a populated game_copy/ is active, use it as the
+  // effective content root.  m_lastGameBaseContentDir retains the *original* path
+  // so that re-indexing always re-evaluates the current profile state rather than
+  // locking in a stale game_copy path.
+  QString effectiveBaseContentDir = baseContentDir;
+  if (m_profileContext) {
+      const QString copyRoot = m_profileContext->editContentRoot();
+      if (!copyRoot.isEmpty())
+          effectiveBaseContentDir = copyRoot;
+  }
+
+  startIndexing(displayName, rootPath, effectiveBaseContentDir, updateContentDir);
   updateDocumentActions();
 }
 
@@ -2381,6 +2412,7 @@ void MainWindow::onManageProfiles() {
         m_profileManager.get(),
         m_profileContext->activeGameId(),
         m_profileContext->activeGameDisplayName(),
+        m_lastGameBaseContentDir,  // Phase 7: source for game_copy/
         this);
     dlg->setAttribute(Qt::WA_DeleteOnClose);
     dlg->show();
@@ -2428,6 +2460,13 @@ void MainWindow::buildUi() {
       });
   }
 
+  // ---- View menu (Phase 3B: audio browser) ----
+  auto* viewMenu = menuBar()->addMenu("View");
+  m_actAudioBrowser = viewMenu->addAction("Audio Browser");
+  m_actAudioBrowser->setCheckable(true);
+  m_actAudioBrowser->setShortcut(QKeySequence("Ctrl+Shift+A"));
+  m_actAudioBrowser->setToolTip("Toggle the Audio Browser panel (Ctrl+Shift+A)");
+
   auto* helpMenu = menuBar()->addMenu("Help");
   m_actCoreHelp = helpMenu->addAction("ASTra Core Help");
   connect(m_actCoreHelp, &QAction::triggered, this, &MainWindow::onShowCoreHelp);
@@ -2457,6 +2496,14 @@ void MainWindow::buildUi() {
   tb->addAction(m_actSave);
   tb->addAction(m_actSaveAs);
   tb->addAction(m_actRevert);
+
+  // Audio browser toggle (speaker icon)
+  tb->addSeparator();
+  auto* actAudioTb = tb->addAction(QStringLiteral("\U0001F50A Audio"));  // 🔊
+  actAudioTb->setToolTip(QStringLiteral("Toggle Audio Browser (Ctrl+Shift+A)"));
+  connect(actAudioTb, &QAction::triggered, this, [this]() {
+      if (m_actAudioBrowser) m_actAudioBrowser->trigger();
+  });
 
   // Right-align the version badge by filling remaining space with a spacer.
   auto* toolbarSpacer = new QWidget(this);
@@ -3711,6 +3758,17 @@ if (!m_tree) return;
   setCentralWidget(m_viewerHost);
 
   updateDocumentActions();
+
+  // ---- Audio Browser dock (Phase 3B) ----
+  m_audioBrowser = new gf::gui::AudioBrowserPanel(this);
+  m_audioBrowser->setObjectName("dock_audio_browser");
+  addDockWidget(Qt::RightDockWidgetArea, m_audioBrowser);
+  m_audioBrowser->hide();
+
+  connect(m_actAudioBrowser, &QAction::toggled,
+          m_audioBrowser, &QWidget::setVisible);
+  connect(m_audioBrowser, &QDockWidget::visibilityChanged,
+          m_actAudioBrowser, &QAction::setChecked);
 }
 
 bool MainWindow::openExternalTextFile(const QString& path)
@@ -4915,6 +4973,7 @@ if (isEmbedded) {
     QTreeWidgetItem* grpUI = nullptr;
     QTreeWidgetItem* grpModels = nullptr;
     QTreeWidgetItem* grpASTs = nullptr;
+    QTreeWidgetItem* grpVideos = nullptr;
     QTreeWidgetItem* grpConfigs = nullptr;
     QTreeWidgetItem* grpDatabase = nullptr;
     QTreeWidgetItem* grpUnknown = nullptr;
@@ -4924,6 +4983,7 @@ if (isEmbedded) {
       grpUI = ensureGroup(item, "UI");
       grpModels = ensureGroup(item, "Models");
       grpASTs = ensureGroup(item, "ASTs");
+      grpVideos = ensureGroup(item, "Videos");
       grpConfigs = ensureGroup(item, "Configs");
       grpDatabase = ensureGroup(item, "Database");
       grpUnknown = ensureGroup(item, "Unknown");
@@ -4969,13 +5029,15 @@ for (const auto& e : idx->entries) {
 
       // Fallback classification based on filename when the parser couldn't infer it.
       // This prevents obvious configs (e.g., .xml) from showing up under Unknown.
-      if (type == "Unknown") {
+      if (type == "Unknown" || type == "ZLIB") {
         const QString lowerName = displayName.toLower();
         if (lowerName.endsWith(".xml")) type = "XML";
         else if (lowerName.endsWith(".json")) type = "JSON";
         else if (lowerName.endsWith(".ini") || lowerName.endsWith(".cfg")) type = "INI";
         else if (lowerName.endsWith(".txt") || lowerName.endsWith(".csv") || lowerName.endsWith(".log")) type = "TXT";
         else if (lowerName.endsWith(".yaml") || lowerName.endsWith(".yml")) type = "YAML";
+        else if (lowerName.endsWith(".sbkr") || lowerName.endsWith(".sbk")) type = "SBK";
+        else if (lowerName.endsWith(".sbbe") || lowerName.endsWith(".sbse") || lowerName.endsWith(".sbb")) type = "SBB";
       }
       const QString cacheKey = NameCache::makeKey(path,
                                                   static_cast<quint64>(baseOffset),
@@ -5086,7 +5148,8 @@ if (isEmbedded) {
 
       QTreeWidgetItem* dest = item;
 if (isQklRoot) {
-  if ((type == "DDS" || type == "P3R" || type == "XPR" || type == "XPR2") && grpTextures) dest = grpTextures;
+  if ((type == "VP6" || type == "MP4") && grpVideos) dest = grpVideos;
+  else if ((type == "DDS" || type == "P3R" || type == "XPR" || type == "XPR2") && grpTextures) dest = grpTextures;
   else if ((type == "APT" || type == "APT1" || type == "CONST" || type == "APTDATA") && grpUI) {
     const QString grp = deriveUiGroupFromExportBase(displayName);
     dest = ensureGroup(grpUI, grp);
@@ -5103,6 +5166,7 @@ if (isQklRoot) {
     }
     else if (kind == "Textures" && grpTextures) dest = grpTextures;
     else if (kind == "Models" && grpModels) dest = grpModels;
+    else if (kind == "Videos" && grpVideos) dest = grpVideos;
     else dest = grpASTs;
   }
   else if ((type == "XML" || type == "TXT" || type == "TEXT" || type == "INI" || type == "CFG" || type == "CONF" || type == "JSON" || type == "YAML" || type == "YML" || type == "PY" || type == "PYC") && grpConfigs) dest = grpConfigs;
@@ -5605,6 +5669,42 @@ void MainWindow::onTreeContextMenu(const QPoint& pos) {
   if (isExtractableEntry && typeUpper == "AST") {
     menu.addSeparator();
     renameFriendlyAct = menu.addAction("Rename Friendly Name…");
+  }
+
+  // Media actions — detect media kind for this entry.
+  // Fast path: use m_previewContext header bytes if already loaded for this entry.
+  // Fallback:  read the first 32 bytes from the container directly (no full load needed).
+  QAction* mediaExtractOriginalAct  = nullptr;
+  QAction* mediaExportMp4Act        = nullptr;
+  QAction* mediaReplaceWithMp4Act   = nullptr;
+  if (isExtractableEntry && isEmbedded) {
+    const quint32 itemIdx = static_cast<quint32>(item->data(0, Qt::UserRole + 6).toULongLong());
+    gf::media::MediaKind mediaKind = gf::media::MediaKind::Unknown;
+
+    if (!m_previewContext.rawBytes.isEmpty() &&
+        m_previewContext.entryPath == path &&
+        m_previewContext.entryIndex == itemIdx) {
+      // Entry is already in preview cache — use header bytes from there.
+      const QByteArray& hdrSrc = m_previewContext.inflatedBytes.isEmpty()
+                                   ? m_previewContext.rawBytes
+                                   : m_previewContext.inflatedBytes;
+      const auto* ptr = reinterpret_cast<const std::uint8_t*>(hdrSrc.constData());
+      mediaKind = gf::media::detectMedia(ptr, static_cast<std::size_t>(hdrSrc.size()));
+    } else {
+      // Entry not yet previewed — read 32 bytes from the container to check magic.
+      const quint64 baseOff = item->data(0, Qt::UserRole + 1).toULongLong();
+      const std::vector<std::uint8_t> hdr = read_file_range(path, baseOff, 32);
+      if (!hdr.empty())
+        mediaKind = gf::media::detectMedia(hdr.data(), hdr.size());
+    }
+
+    if (mediaKind != gf::media::MediaKind::Unknown) {
+      menu.addSeparator();
+      mediaExtractOriginalAct = menu.addAction("Extract Original…");
+      mediaExportMp4Act       = menu.addAction("Export as MP4…");
+      if (mediaKind == gf::media::MediaKind::EaVp6Container)
+        mediaReplaceWithMp4Act = menu.addAction("Replace with MP4…");
+    }
   }
 
   auto chooseOutputDir = [&]() -> QString {
@@ -6471,6 +6571,299 @@ void MainWindow::onTreeContextMenu(const QPoint& pos) {
 
     setDirty(true);
     statusBar()->showMessage("Friendly name updated (unsaved).", 2500);
+    return;
+  }
+
+  if (mediaExtractOriginalAct && chosen == mediaExtractOriginalAct) {
+    // Load the FULL entry bytes from the container — do not use the preview cache,
+    // which is capped at kMaxStoredRead (2 MB) and would truncate large video files.
+    const quint32 entryIdx = static_cast<quint32>(item->data(0, Qt::UserRole + 6).toULongLong());
+    const QString entryName = item->text(0);
+
+    gf::core::logInfo(gf::core::LogCategory::FileIO,
+        "Media extract original start",
+        ("entry='" + entryName + "' container='" + path + "'").toStdString());
+
+    std::string loadErr;
+    auto edOpt = gf::core::AstContainerEditor::load(path.toStdString(), &loadErr);
+    if (!edOpt.has_value()) {
+      QMessageBox::warning(this, QStringLiteral("Extract Original"),
+                           QStringLiteral("Could not load container:\n%1")
+                               .arg(QString::fromStdString(loadErr)));
+      return;
+    }
+    auto bytesOpt = edOpt->getEntryStoredBytes(entryIdx);
+    if (!bytesOpt.has_value() || bytesOpt->empty()) {
+      QMessageBox::warning(this, QStringLiteral("Extract Original"),
+                           QStringLiteral("Could not read entry bytes from container."));
+      return;
+    }
+    std::vector<std::uint8_t> fullBytes = std::move(*bytesOpt);
+
+    const auto* ptr = fullBytes.data();
+    const gf::media::MediaProbeResult probe =
+        gf::media::probeMedia(ptr, fullBytes.size());
+
+    gf::core::logInfo(gf::core::LogCategory::FileIO,
+        "Media extract original bytes loaded",
+        ("entry='" + entryName + "' bytes=" + QString::number(fullBytes.size()) +
+         " kind=" + QString::fromStdString(probe.containerName)).toStdString());
+
+    const QString ext = QString::fromStdString(gf::media::suggestedExtension(probe.kind));
+    QSettings s(kSettingsOrg, kSettingsApp);
+    const QString lastDir = s.value(QStringLiteral("ui/last_extract_dir"),
+                                    QFileInfo(path).absolutePath()).toString();
+    const QString baseName = QFileInfo(entryName).completeBaseName();
+    const QString outPath = QFileDialog::getSaveFileName(
+        this, QStringLiteral("Extract Original"),
+        QDir(lastDir).filePath(baseName + ext),
+        QStringLiteral("*%1;;All Files (*)").arg(ext));
+    if (outPath.isEmpty()) return;
+    s.setValue(QStringLiteral("ui/last_extract_dir"), QFileInfo(outPath).absolutePath());
+
+    if (!gf::media::extractRaw(fullBytes, std::filesystem::path(outPath.toStdWString()))) {
+      gf::core::logError(gf::core::LogCategory::FileIO,
+          "Media extract original failed", ("output='" + outPath + "'").toStdString());
+      QMessageBox::warning(this, QStringLiteral("Extract Original"),
+                           QStringLiteral("Could not write output file:\n%1").arg(outPath));
+    } else {
+      gf::core::logInfo(gf::core::LogCategory::FileIO,
+          "Media extract original success", ("output='" + outPath + "'").toStdString());
+      statusBar()->showMessage(
+          QStringLiteral("Extracted to %1").arg(QDir::toNativeSeparators(outPath)), 3000);
+    }
+    return;
+  }
+
+  if (mediaExportMp4Act && chosen == mediaExportMp4Act) {
+    // Load the FULL entry bytes from the container — do not use the preview cache,
+    // which is capped at kMaxStoredRead (2 MB) and would truncate large video files.
+    const quint32 entryIdx = static_cast<quint32>(item->data(0, Qt::UserRole + 6).toULongLong());
+    const QString entryName = item->text(0);
+
+    gf::core::logInfo(gf::core::LogCategory::FileIO,
+        "Media export MP4 start",
+        ("entry='" + entryName + "' container='" + path + "'").toStdString());
+
+    std::string loadErr;
+    auto edOpt = gf::core::AstContainerEditor::load(path.toStdString(), &loadErr);
+    if (!edOpt.has_value()) {
+      QMessageBox::warning(this, QStringLiteral("Export as MP4"),
+                           QStringLiteral("Could not load container:\n%1")
+                               .arg(QString::fromStdString(loadErr)));
+      return;
+    }
+    auto bytesOpt = edOpt->getEntryStoredBytes(entryIdx);
+    if (!bytesOpt.has_value() || bytesOpt->empty()) {
+      QMessageBox::warning(this, QStringLiteral("Export as MP4"),
+                           QStringLiteral("Could not read entry bytes from container."));
+      return;
+    }
+    std::vector<std::uint8_t> fullBytes = std::move(*bytesOpt);
+
+    const auto* ptr = fullBytes.data();
+    const gf::media::MediaProbeResult probe =
+        gf::media::probeMedia(ptr, fullBytes.size());
+
+    gf::core::logInfo(gf::core::LogCategory::FileIO,
+        "Media export MP4 bytes loaded",
+        ("entry='" + entryName + "' bytes=" + QString::number(fullBytes.size()) +
+         " kind=" + QString::fromStdString(probe.containerName)).toStdString());
+
+    QSettings s(kSettingsOrg, kSettingsApp);
+    const QString lastDir = s.value(QStringLiteral("ui/last_extract_dir"),
+                                    QFileInfo(path).absolutePath()).toString();
+    const QString baseName = QFileInfo(entryName).completeBaseName();
+    const QString outPath = QFileDialog::getSaveFileName(
+        this, QStringLiteral("Export as MP4"),
+        QDir(lastDir).filePath(baseName + QStringLiteral(".mp4")),
+        QStringLiteral("MP4 files (*.mp4);;All Files (*)"));
+    if (outPath.isEmpty()) return;
+    s.setValue(QStringLiteral("ui/last_extract_dir"), QFileInfo(outPath).absolutePath());
+
+    std::string exportErr;
+    if (!gf::media::exportAsMp4(fullBytes, probe,
+                                 std::filesystem::path(outPath.toStdWString()), exportErr)) {
+      gf::core::logError(gf::core::LogCategory::FileIO,
+          "Media export MP4 failed",
+          ("output='" + outPath + "' error=" + QString::fromStdString(exportErr)).toStdString());
+      QMessageBox::warning(this, QStringLiteral("Export as MP4"),
+                           QStringLiteral("MP4 export failed:\n%1")
+                               .arg(QString::fromStdString(exportErr)));
+    } else {
+      gf::core::logInfo(gf::core::LogCategory::FileIO,
+          "Media export MP4 success", ("output='" + outPath + "'").toStdString());
+      statusBar()->showMessage(
+          QStringLiteral("Exported as MP4: %1").arg(QDir::toNativeSeparators(outPath)), 3000);
+    }
+    return;
+  }
+
+  if (mediaReplaceWithMp4Act && chosen == mediaReplaceWithMp4Act) {
+    // ── Step 1: pick the source MP4 ──────────────────────────────────────────
+    QSettings s(kSettingsOrg, kSettingsApp);
+    const QString lastImportDir = s.value(QStringLiteral("ui/last_media_import_dir"),
+                                           QDir::homePath()).toString();
+    const QString sourcePath = QFileDialog::getOpenFileName(
+        this,
+        QStringLiteral("Select Source Video"),
+        lastImportDir,
+        QStringLiteral("Video files (*.mp4 *.mkv *.avi *.mov *.wmv);;All Files (*)"));
+    if (sourcePath.isEmpty()) return;
+    s.setValue(QStringLiteral("ui/last_media_import_dir"),
+               QFileInfo(sourcePath).absolutePath());
+
+    // ── Step 2: load the FULL original EA VP6 bytes ───────────────────────────
+    const quint32 entryIdx  = static_cast<quint32>(item->data(0, Qt::UserRole + 6).toULongLong());
+    const QString entryName = item->text(0);
+
+    gf::core::logInfo(gf::core::LogCategory::FileIO,
+        "Media replace VP6 preflight start",
+        ("entry='" + entryName + "' container='" + path +
+         "' source='" + sourcePath + "'").toStdString());
+
+    std::string loadErr;
+    auto edOpt = gf::core::AstContainerEditor::load(path.toStdString(), &loadErr);
+    if (!edOpt.has_value()) {
+      QMessageBox::warning(this, QStringLiteral("Replace with MP4"),
+                           QStringLiteral("Could not load container:\n%1")
+                               .arg(QString::fromStdString(loadErr)));
+      return;
+    }
+    auto bytesOpt = edOpt->getEntryStoredBytes(entryIdx);
+    if (!bytesOpt.has_value() || bytesOpt->empty()) {
+      QMessageBox::warning(this, QStringLiteral("Replace with MP4"),
+                           QStringLiteral("Could not read entry bytes from container."));
+      return;
+    }
+    const std::vector<std::uint8_t> originalBytes = std::move(*bytesOpt);
+
+    gf::core::logInfo(gf::core::LogCategory::FileIO,
+        "Media replace VP6 bytes loaded",
+        ("entry='" + entryName + "' bytes=" +
+         QString::number(originalBytes.size())).toStdString());
+
+    // ── Step 3: run preflight ─────────────────────────────────────────────────
+    std::string preflightErr;
+    const gf::media::EaVp6ImportPreparationResult preflightResult =
+        gf::media::prepareEaVp6Import(
+            originalBytes,
+            std::filesystem::path(sourcePath.toStdWString()),
+            preflightErr);
+
+    if (!preflightErr.empty()) {
+      gf::core::logError(gf::core::LogCategory::FileIO,
+          "Media replace VP6 preflight internal error",
+          ("entry='" + entryName + "' error=" + QString::fromStdString(preflightErr)).toStdString());
+    }
+
+    gf::core::logInfo(gf::core::LogCategory::FileIO,
+        "Media replace VP6 preflight complete",
+        ("entry='" + entryName +
+         "' possible=" + (preflightResult.possible ? "true" : "false") +
+         " blockingReasons=" + QString::number(preflightResult.blockingReasons.size())).toStdString());
+
+    // ── Step 4: show preflight dialog ─────────────────────────────────────────
+    gf::media::PipelineEaVp6ReplacementBackend pipelineBackend;
+    const bool backendAvailable = pipelineBackend.available();
+
+    const QString diagnosticText =
+        QString::fromStdString(gf::media::describeImportPreparation(preflightResult));
+
+    MediaImportDialog dlg(preflightResult.possible, backendAvailable,
+                          diagnosticText, this);
+    dlg.exec();
+
+    if (!dlg.userWantsToProceed()) {
+      gf::core::logInfo(gf::core::LogCategory::FileIO,
+          "Media replace VP6 cancelled by user",
+          ("entry='" + entryName + "'").toStdString());
+      return;
+    }
+
+    // ── Step 5: run the full VP6 replacement pipeline ─────────────────────────
+    gf::core::logInfo(gf::core::LogCategory::FileIO,
+        "Media replace VP6 pipeline start",
+        ("entry='" + entryName + "'").toStdString());
+
+    std::string replaceErr;
+    auto newBytesOpt = pipelineBackend.replaceWithMp4(
+        originalBytes,
+        std::filesystem::path(sourcePath.toStdWString()),
+        replaceErr);
+
+    if (!newBytesOpt.has_value()) {
+      gf::core::logError(gf::core::LogCategory::FileIO,
+          "Media replace VP6 pipeline failed",
+          ("entry='" + entryName + "' error=" + QString::fromStdString(replaceErr)).toStdString());
+      QMessageBox::warning(this, QStringLiteral("Replace with MP4"),
+                           QStringLiteral("Replacement failed:\n%1")
+                               .arg(QString::fromStdString(replaceErr)));
+      return;
+    }
+
+    // ── Step 6: write new EA VP6 bytes back to the container ─────────────────
+    {
+      std::string writeErr;
+      auto edOpt2 = gf::core::AstContainerEditor::load(path.toStdString(), &writeErr);
+      if (!edOpt2.has_value()) {
+        QMessageBox::warning(this, QStringLiteral("Replace with MP4"),
+                             QStringLiteral("Could not load container for writing:\n%1")
+                                 .arg(QString::fromStdString(writeErr)));
+        return;
+      }
+
+      // Save previous bytes for undo.
+      QByteArray previousStoredBytes;
+      {
+        auto prevOpt = edOpt2->getEntryStoredBytes(entryIdx);
+        if (prevOpt.has_value() && !prevOpt->empty())
+          previousStoredBytes = QByteArray(
+              reinterpret_cast<const char*>(prevOpt->data()),
+              static_cast<qsizetype>(prevOpt->size()));
+      }
+
+      const auto& newBytes = *newBytesOpt;
+      if (!edOpt2->replaceEntryBytes(
+              entryIdx,
+              std::span<const std::uint8_t>(newBytes.data(), newBytes.size()),
+              gf::core::AstContainerEditor::ReplaceMode::Raw,
+              &writeErr))
+      {
+        QMessageBox::warning(this, QStringLiteral("Replace with MP4"),
+                             QStringLiteral("Could not replace entry bytes:\n%1")
+                                 .arg(QString::fromStdString(writeErr)));
+        return;
+      }
+
+      if (!edOpt2->writeInPlace(&writeErr, /*makeBackup=*/true)) {
+        QMessageBox::warning(this, QStringLiteral("Replace with MP4"),
+                             QStringLiteral("Could not write container to disk:\n%1")
+                                 .arg(QString::fromStdString(writeErr)));
+        return;
+      }
+
+      // Update live editor + undo state (mirrors texture replace pattern).
+      m_liveAstEditor = std::make_unique<gf::core::AstContainerEditor>(std::move(*edOpt2));
+      m_liveAstPath = path;
+      m_lastReplaceUndo.valid = !previousStoredBytes.isEmpty();
+      m_lastReplaceUndo.containerPath = path;
+      m_lastReplaceUndo.entryIndex = entryIdx;
+      m_lastReplaceUndo.previousStoredBytes = previousStoredBytes;
+      m_lastReplaceUndo.previousPreviewBytes = QByteArray();
+      m_lastReplaceUndo.itemCacheKey = makeTreeCacheKey(item);
+      m_lastReplaceUndo.displayName = entryName;
+      if (m_actUndoLastReplace) m_actUndoLastReplace->setEnabled(m_lastReplaceUndo.valid);
+      setDirty(true);
+
+      gf::core::logInfo(gf::core::LogCategory::FileIO,
+          "Media replace VP6 complete",
+          ("entry='" + entryName + "' newBytes=" +
+           QString::number(static_cast<qulonglong>(newBytes.size()))).toStdString());
+
+      statusBar()->showMessage(
+          QStringLiteral("VP6 replacement complete — backup created. Save to commit."), 5000);
+    }
     return;
   }
 }
@@ -10910,6 +11303,45 @@ QString MainWindow::buildInspectorText(const PreviewSelectionContext& ctx) const
     lines << QStringLiteral("Magic    : %1 | %2").arg(hexMagic.trimmed(), asciiMagic);
   }
 
+  // Media probe
+  {
+    const QByteArray& probeSrc = ctx.inflatedBytes.isEmpty() ? rawBytes : ctx.inflatedBytes;
+    if (!probeSrc.isEmpty()) {
+      const auto* ptr = reinterpret_cast<const std::uint8_t*>(probeSrc.constData());
+      const gf::media::MediaProbeResult probe =
+          gf::media::probeMedia(ptr, static_cast<std::size_t>(probeSrc.size()));
+      if (probe.kind != gf::media::MediaKind::Unknown) {
+        lines << QString();
+        lines << QStringLiteral("--- Media ---");
+
+        QString kindLabel;
+        switch (probe.kind) {
+        case gf::media::MediaKind::EaVp6Container: kindLabel = QStringLiteral("EA VP6 Video"); break;
+        case gf::media::MediaKind::Mp4:            kindLabel = QStringLiteral("MP4 Video");    break;
+        default:                                   kindLabel = QStringLiteral("Unknown");       break;
+        }
+        lines << QStringLiteral("Kind     : %1").arg(kindLabel);
+        lines << QStringLiteral("Container: %1").arg(QString::fromStdString(probe.containerName));
+        if (!probe.videoCodec.empty())
+          lines << QStringLiteral("Video    : %1").arg(QString::fromStdString(probe.videoCodec));
+        if (!probe.audioCodec.empty())
+          lines << QStringLiteral("Audio    : %1").arg(QString::fromStdString(probe.audioCodec));
+        lines << QStringLiteral("Has video: %1").arg(probe.hasVideo  ? QStringLiteral("yes") : QStringLiteral("no"));
+        lines << QStringLiteral("Has audio: %1").arg(probe.hasAudio  ? QStringLiteral("yes") : QStringLiteral("no"));
+        lines << QStringLiteral("Width    : %1").arg(probe.width  > 0 ? QString::number(probe.width)  : QStringLiteral("Unknown"));
+        lines << QStringLiteral("Height   : %1").arg(probe.height > 0 ? QString::number(probe.height) : QStringLiteral("Unknown"));
+        lines << QStringLiteral("FPS      : %1").arg(probe.fps    > 0.0 ? QString::number(probe.fps, 'f', 2) : QStringLiteral("Unknown"));
+        lines << QStringLiteral("Raw ext. : %1").arg(probe.rawExtractSupported   ? QStringLiteral("yes") : QStringLiteral("no"));
+        lines << QStringLiteral("MP4 exp. : %1").arg(probe.transcodeMp4Supported ? QStringLiteral("yes (via FFmpeg)") : QStringLiteral("no"));
+        if (!probe.warnings.empty()) {
+          lines << QStringLiteral("Warnings :");
+          for (const auto& w : probe.warnings)
+            lines << QStringLiteral("  ! %1").arg(QString::fromStdString(w));
+        }
+      }
+    }
+  }
+
   // Printable strings scan
   {
     const QByteArray& scanSrc = ctx.inflatedBytes.isEmpty() ? rawBytes : ctx.inflatedBytes;
@@ -11083,6 +11515,57 @@ void MainWindow::showViewerForItem(QTreeWidgetItem* item) {
   const QByteArray stored = m_previewContext.rawBytes;
   const QByteArray view = m_previewContext.hexBytes;
   const QString type = item->text(1);
+
+  // ── Phase 3B: audio detection & browser routing ──────────────────────────
+  // Use inflated bytes for detection (rawBytes is compressed when entry is ZLIB).
+  if (m_audioBrowser) {
+    const QByteArray& detectionSrc = !m_previewContext.inflatedBytes.isEmpty()
+                                       ? m_previewContext.inflatedBytes
+                                       : stored;
+    const std::size_t hdrCap = std::min<std::size_t>(static_cast<std::size_t>(detectionSrc.size()), 8u);
+    std::vector<std::uint8_t> hdrBuf(hdrCap);
+    if (hdrCap > 0)
+      std::memcpy(hdrBuf.data(), detectionSrc.constData(), hdrCap);
+    const auto audioDetect = gf::core::detectFileKind(
+        std::span<const std::uint8_t>(hdrBuf.data(), hdrBuf.size()));
+
+    if (audioDetect.kind == gf::core::FileKind::Sbkr ||
+        audioDetect.kind == gf::core::FileKind::Sbbe) {
+      const bool isSbkr = (audioDetect.kind == gf::core::FileKind::Sbkr);
+      item->setText(1, isSbkr ? QStringLiteral("SBK") : QStringLiteral("SBB"));
+
+      QString audioPath;
+      if (!isEmbedded && QFileInfo::exists(path)) {
+        audioPath = path;  // standalone file: read directly
+      } else {
+        // Embedded entry: write decompressed bytes to a temp file
+        if (!m_audioTempFilePath.isEmpty()) {
+          QFile::remove(m_audioTempFilePath);
+          m_audioTempFilePath.clear();
+        }
+        const QString suffix = isSbkr ? QStringLiteral(".sbkr") : QStringLiteral(".sbbe");
+        QTemporaryFile tmp(QDir::tempPath() + QStringLiteral("/astra_audio_XXXXXX") + suffix);
+        tmp.setAutoRemove(false);
+        if (tmp.open()) {
+          const QByteArray& writeBytes = !m_previewContext.inflatedBytes.isEmpty()
+                                           ? m_previewContext.inflatedBytes
+                                           : stored;
+          tmp.write(writeBytes);
+          tmp.close();
+          m_audioTempFilePath = tmp.fileName();
+          audioPath = m_audioTempFilePath;
+        }
+      }
+
+      if (!audioPath.isEmpty()) {
+        m_audioBrowser->loadFile(audioPath);
+        if (!m_audioBrowser->isVisible()) {
+          m_actAudioBrowser->setChecked(true);
+          m_audioBrowser->show();
+        }
+      }
+    }
+  }
 
   const QString where = isEmbedded ? QString("embedded @ 0x%1").arg(baseOffset, 0, 16) : QString("file");
   m_viewerLabel->setPlainText(QString("Selected: %1 (%2)\n%3\n%4\n\n%5")

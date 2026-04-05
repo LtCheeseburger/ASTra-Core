@@ -86,6 +86,9 @@ std::string_view recommendedViewerForKind(FileKind kind) noexcept {
       return kViewerText;
     case FileKind::Ast:
       return kViewerHex; // AST containers expand in the tree; hex is the raw view
+    case FileKind::Sbkr:
+    case FileKind::Sbbe:
+      return kViewerAudio;
     case FileKind::BinaryUnknown:
     case FileKind::Unknown:
     default:
@@ -113,6 +116,8 @@ std::string_view kindDisplayName(FileKind kind) noexcept {
     case FileKind::IniLike:       return "INI/config";
     case FileKind::TextPlain:     return "Plain text";
     case FileKind::ImageGeneric:  return "Image";
+    case FileKind::Sbkr:          return "SBKR (audio)";
+    case FileKind::Sbbe:          return "SBbe (audio)";
     default:                      return "Unknown";
   }
 }
@@ -137,6 +142,26 @@ FileDetectionResult detectFileKind(
     r.reason = "BGFA magic";
     r.isBinary = true;
     r.recommendedViewer = kViewerHex;
+    return r;
+  }
+
+  // EA SBKR sound-bank descriptor ("SBKR")
+  if (matchMagic(headerBytes, 0, "SBKR", 4)) {
+    r.kind = FileKind::Sbkr;
+    r.confidence = 99;
+    r.reason = "SBKR magic";
+    r.isBinary = true;
+    r.recommendedViewer = kViewerAudio;
+    return r;
+  }
+
+  // EA SBbe sample container ("SBbe")
+  if (matchMagic(headerBytes, 0, "SBbe", 4)) {
+    r.kind = FileKind::Sbbe;
+    r.confidence = 99;
+    r.reason = "SBbe magic";
+    r.isBinary = true;
+    r.recommendedViewer = kViewerAudio;
     return r;
   }
 
@@ -379,6 +404,24 @@ FileDetectionResult detectFileKind(
       r.reason = ".ast extension (no BGFA magic)";
       r.isBinary = true;
       r.recommendedViewer = kViewerHex;
+      return r;
+    }
+
+    // EA audio extensions
+    if (ext == "sbkr" || ext == "sbk") {
+      r.kind = FileKind::Sbkr;
+      r.confidence = 75;
+      r.reason = ".sbkr/.sbk extension (no magic)";
+      r.isBinary = true;
+      r.recommendedViewer = kViewerAudio;
+      return r;
+    }
+    if (ext == "sbbe" || ext == "sbse" || ext == "sbb") {
+      r.kind = FileKind::Sbbe;
+      r.confidence = 75;
+      r.reason = ".sbbe/.sbse/.sbb extension (no magic)";
+      r.isBinary = true;
+      r.recommendedViewer = kViewerAudio;
       return r;
     }
 

@@ -49,7 +49,6 @@ QString ModPackageExporter::layerSubdir(const QString&             destRootPath,
 
 // static
 bool ModPackageExporter::writeManifest(const ModExportSpec& spec,
-                                        const QStringList&   payloadFiles,
                                         const QString&       packageDir,
                                         QString*             outErr) {
     QJsonObject root;
@@ -94,12 +93,8 @@ bool ModPackageExporter::writeManifest(const ModExportSpec& spec,
         root["previews"] = arr;
     }
 
-    // payload_files: informational listing; installer scans files/ directly
-    {
-        QJsonArray arr;
-        for (const QString& f : payloadFiles) arr.append(f);
-        root["payload_files"] = arr;
-    }
+    // payload_files intentionally omitted — the installer scans files/ at install time,
+    // and large mods (2000+ files) would push the JSON over the 64 KiB safety limit.
 
     const QString json =
         QString::fromUtf8(QJsonDocument(root).toJson(QJsonDocument::Indented));
@@ -224,9 +219,8 @@ ModExportResult ModPackageExporter::exportPackage(const ModExportSpec&       spe
     }
 
     // ── 7. Copy files into files/<layer>/ ─────────────────────────────────────
-    int         step        = 0;
-    bool        cancelled   = false;
-    QStringList payloadFiles;
+    int  step      = 0;
+    bool cancelled = false;
 
     for (const ResolvedAstFile& entry : resolved.files) {
         if (progress) {
@@ -243,6 +237,8 @@ ModExportResult ModPackageExporter::exportPackage(const ModExportSpec&       spe
         const QString layer    = layerSubdir(entry.destRootPath, runtime);
         const QString destDir  = QDir(packageDir).filePath("files/" + layer);
         const QString destFile = QDir(destDir).filePath(entry.filename);
+        // Phase 6A: destFile may include subdirs (e.g. files/update/DLC/CFBR/file.AST)
+        const QString destFileParent = QFileInfo(destFile).absolutePath();
 
         // Warn if destRootPath non-empty but not matched to any content root
         if (!entry.destRootPath.isEmpty() && layer == QLatin1String("base")) {
@@ -255,9 +251,10 @@ ModExportResult ModPackageExporter::exportPackage(const ModExportSpec&       spe
                     .arg(entry.filename, entry.destRootPath);
         }
 
-        if (!QDir().mkpath(destDir)) {
+        // Phase 6A: create the full parent path (handles nested DLC folders)
+        if (!QDir().mkpath(destFileParent)) {
             if (progress) { progress->setValue(resolved.files.size()); delete progress; }
-            result.errors << QString("Cannot create directory: %1").arg(destDir);
+            result.errors << QString("Cannot create directory: %1").arg(destFileParent);
             result.message = "Export aborted: " + result.errors.last();
             gf::core::logError(gf::core::LogCategory::FileIO,
                                "ModPackageExporter: mkpath failed", destDir.toStdString());
@@ -277,7 +274,6 @@ ModExportResult ModPackageExporter::exportPackage(const ModExportSpec&       spe
             return result;
         }
 
-        payloadFiles << (layer + "/" + entry.filename);
         ++step;
     }
 
@@ -314,9 +310,8 @@ ModExportResult ModPackageExporter::exportPackage(const ModExportSpec&       spe
     }
 
     // ── 9. Write astra_mod.json ───────────────────────────────────────────────
-    payloadFiles.sort();
     QString manifestErr;
-    if (!writeManifest(spec, payloadFiles, packageDir, &manifestErr)) {
+    if (!writeManifest(spec, packageDir, &manifestErr)) {
         result.errors << "Failed to write astra_mod.json: " + manifestErr;
         result.message = result.errors.last();
         QDir(packageDir).removeRecursively();

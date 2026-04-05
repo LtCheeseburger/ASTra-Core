@@ -31,6 +31,10 @@ struct WorkspaceLayout {
     QString overlayRootDir(int idx)     const { return overlayRootsDir() + "/" + QString::number(idx); }
     QString rootsManifestPath()         const { return overlayRootsDir() + "/roots_manifest.json"; }
 
+    // Phase 7: copy-based editing — game content copied here for profile-safe editing.
+    // Users edit game_copy/ files; the original source game is never touched in profile mode.
+    QString gameCopyDir()        const { return p("game_copy"); }
+
     // Build / temp / logs / snapshots
     QString buildDir()           const { return p("build"); }
     QString tempDir()            const { return p("temp"); }

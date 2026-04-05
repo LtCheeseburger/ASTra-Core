@@ -1,6 +1,7 @@
 #include "InstalledModsDialog.hpp"
 #include "InstalledModsModel.hpp"
 #include "ModCatalogService.hpp"
+#include "ModUninstallService.hpp"
 
 #include <QDir>
 #include <QFileInfo>
@@ -96,6 +97,10 @@ InstalledModsDialog::InstalledModsDialog(const ModProfile& profile,
     m_btnDisable->setEnabled(false);
     m_btnDisable->setToolTip("Disable the selected mod without removing its files");
 
+    m_btnUninstall = new QPushButton("Uninstall\u2026", this);
+    m_btnUninstall->setEnabled(false);
+    m_btnUninstall->setToolTip("Remove the selected mod from this profile workspace");
+
     m_btnRefresh = new QPushButton("Refresh", this);
     m_btnRefresh->setToolTip("Re-read the registry and re-check installed files");
 
@@ -103,6 +108,7 @@ InstalledModsDialog::InstalledModsDialog(const ModProfile& profile,
 
     btnRow->addWidget(m_btnEnable);
     btnRow->addWidget(m_btnDisable);
+    btnRow->addWidget(m_btnUninstall);
     btnRow->addWidget(m_btnRefresh);
     btnRow->addStretch(1);
     btnRow->addWidget(m_btnClose);
@@ -114,10 +120,11 @@ InstalledModsDialog::InstalledModsDialog(const ModProfile& profile,
                 onSelectionChanged();
             });
 
-    connect(m_btnEnable,  &QPushButton::clicked, this, &InstalledModsDialog::onEnable);
-    connect(m_btnDisable, &QPushButton::clicked, this, &InstalledModsDialog::onDisable);
-    connect(m_btnRefresh, &QPushButton::clicked, this, &InstalledModsDialog::onRefresh);
-    connect(m_btnClose,   &QPushButton::clicked, this, &QDialog::close);
+    connect(m_btnEnable,    &QPushButton::clicked, this, &InstalledModsDialog::onEnable);
+    connect(m_btnDisable,   &QPushButton::clicked, this, &InstalledModsDialog::onDisable);
+    connect(m_btnUninstall, &QPushButton::clicked, this, &InstalledModsDialog::onUninstall);
+    connect(m_btnRefresh,   &QPushButton::clicked, this, &InstalledModsDialog::onRefresh);
+    connect(m_btnClose,     &QPushButton::clicked, this, &QDialog::close);
 
     populate();
 }
@@ -212,11 +219,44 @@ void InstalledModsDialog::onRefresh() {
     }
 }
 
+void InstalledModsDialog::onUninstall() {
+    const auto e = selectedEntry();
+    if (!e.has_value()) return;
+
+    const int ans = QMessageBox::question(
+        this,
+        "Uninstall Mod",
+        QString("Remove \u201c%1\u201d (v%2) from this profile?\n\n"
+                "This will delete the mod's installed files from the workspace. "
+                "The mod package on disk is not affected and can be re-installed later.")
+            .arg(e->record.modName, e->record.modVersion),
+        QMessageBox::Yes | QMessageBox::Cancel,
+        QMessageBox::Cancel);
+
+    if (ans != QMessageBox::Yes) return;
+
+    const ModUninstallResult result =
+        ModUninstallService::uninstall(m_profile.workspacePath, e->record.installId);
+
+    if (!result.warnings.isEmpty()) {
+        QMessageBox::warning(this, "Uninstall \u2014 Warnings",
+                             result.warnings.join('\n'));
+    }
+
+    if (result.success) {
+        QMessageBox::information(this, "Mod Uninstalled", result.message);
+        populate();
+    } else {
+        QMessageBox::critical(this, "Uninstall Failed", result.message);
+    }
+}
+
 void InstalledModsDialog::updateButtons() {
     const auto e = selectedEntry();
     if (!e.has_value()) {
         m_btnEnable->setEnabled(false);
         m_btnDisable->setEnabled(false);
+        m_btnUninstall->setEnabled(false);
         return;
     }
 
@@ -228,6 +268,9 @@ void InstalledModsDialog::updateButtons() {
 
     // Disable button: only if currently enabled (or partial)
     m_btnDisable->setEnabled(isEnabled || e->status == ModEntryStatus::Partial);
+
+    // Uninstall: always available when a mod is selected
+    m_btnUninstall->setEnabled(true);
 }
 
 void InstalledModsDialog::showEntryDetails(const ModCatalogEntry& entry) {

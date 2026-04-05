@@ -27,8 +27,18 @@ public:
     bool    hasActiveGame()         const { return !m_gameId.isEmpty(); }
 
     // Current profile context
-    std::optional<ModProfile> activeProfile()  const;
+    std::optional<ModProfile> activeProfile()    const;
     bool                      hasActiveProfile() const;
+
+    // Phase 7: returns the game_copy/ path when a profile is active and has a
+    // populated copy.  Returns empty string when no profile is active or the
+    // profile copy has not been built yet.
+    // Use this as the effective content root for opening / saving AST files.
+    QString editContentRoot() const;
+
+    // Returns true if file I/O should be directed to the profile's game_copy/
+    // rather than the original source game directory.
+    bool isEditingProfileCopy() const;
 
 signals:
     // Fired when the active game changes (gameId/displayName are empty when cleared).

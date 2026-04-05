@@ -28,12 +28,23 @@ struct RuntimeTargetConfig {
     QString         gameId;         // SHA-1 cache ID of the game
     RuntimePlatform platform = RuntimePlatform::RPCS3;
     QString         rpcs3ExePath;   // Absolute path to rpcs3.exe
-    QString         astDirPath;     // Absolute path to directory containing qkl_*.AST files (base game / legacy)
+    QString         astDirPath;     // Absolute path to base content root directory (flat *.ast / *.AST)
     QString         configuredAt;   // ISO-8601 UTC timestamp of last save
 
-    // Phase 5A: optional additional content roots (update, DLC, etc.)
+    // Phase 5A/6A: optional additional content roots.
+    // Phase 6A: only one entry with kind==Update is used by the new UI.
+    // Old configs may still contain Dlc/CustomDlc entries (backward compat).
     // Empty = legacy single-root mode; astDirPath is the only live directory.
     QVector<RuntimeContentRoot> contentRoots;
 };
+
+// Phase 6A: convenience accessor — returns the update content root path, or
+// empty if no Update root is configured.
+inline QString updateRootPath(const RuntimeTargetConfig& cfg)
+{
+    for (const RuntimeContentRoot& cr : cfg.contentRoots)
+        if (cr.kind == RuntimeContentKind::Update) return cr.path;
+    return {};
+}
 
 } // namespace gf::gui

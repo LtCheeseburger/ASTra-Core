@@ -14,6 +14,16 @@ add_library(gf_core
   src/scan.cpp
   src/zip_writer.cpp
   src/safe_write.cpp
+  src/media_sniffer.cpp
+  src/ffmpeg_runner.cpp
+  src/media_exporter.cpp
+  src/ea_vp6.cpp
+  src/ea_vp6_import_prep.cpp
+  src/vp6_encoder_backend.cpp
+  src/flv_vp6.cpp
+  src/ea_vp6_containerizer.cpp
+  src/avi_vp6.cpp
+  src/ea_vp6_replacement_backend.cpp
 )
 
 target_include_directories(gf_core PUBLIC

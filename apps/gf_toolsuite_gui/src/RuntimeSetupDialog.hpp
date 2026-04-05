@@ -3,10 +3,8 @@
 #include <QDialog>
 #include <optional>
 
-class QComboBox;
 class QLabel;
 class QLineEdit;
-class QListWidget;
 class QPushButton;
 class QTextBrowser;
 
@@ -14,16 +12,16 @@ namespace gf::gui {
 
 // Modal dialog for configuring the runtime target for a specific game.
 //
-// Fields:
-//   - Platform (dropdown — currently RPCS3 only)
+// Phase 6A fields:
+//   - Platform (informational — RPCS3 only)
 //   - RPCS3 executable path
-//   - Base Game AST directory path (directory containing qkl_*.AST files)
-//   - Phase 5A: Update Root path (optional)
-//   - Phase 5A: DLC Roots list (zero or more additional content roots)
+//   - Base Content Root (directory containing flat *.ast / *.AST files)
+//   - Update Content Root (optional; ASTra recursively discovers *.ast,
+//     *.ast.edat, and DLC subfolders automatically — no explicit DLC list)
 //
 // Flow:
 //   1. User fills in paths (Browse buttons provided)
-//   2. Click "Validate & Save" — validates existence + AST file count
+//   2. Click "Validate & Save" — validates existence + base content file count
 //   3. On success: saves via RuntimeTargetManager and accepts
 //   4. On failure: shows error detail, lets user correct and retry
 //
@@ -41,10 +39,8 @@ public:
 
 private slots:
     void onBrowseRpcs3();
-    void onBrowseAstDir();
+    void onBrowseBaseRoot();
     void onBrowseUpdateRoot();
-    void onAddDlcRoot();
-    void onRemoveDlcRoot();
     void onValidateAndSave();
 
 private:
@@ -52,18 +48,11 @@ private:
 
     QString m_gameId;
 
-    QLineEdit*   m_rpcs3Edit       = nullptr;
-    QLineEdit*   m_astDirEdit      = nullptr;
-    // Phase 5A: optional update root
-    QLineEdit*   m_updateRootEdit  = nullptr;
-    // Phase 5A: DLC roots
-    QListWidget* m_dlcList         = nullptr;
-    QPushButton* m_btnRemoveDlc    = nullptr;
-    QTextBrowser* m_statusArea     = nullptr;
-    QPushButton* m_btnSave         = nullptr;
-
-    // In-memory list of DLC/custom content roots (does not include base or update).
-    QVector<RuntimeContentRoot> m_dlcRoots;
+    QLineEdit*    m_rpcs3Edit        = nullptr;
+    QLineEdit*    m_baseRootEdit     = nullptr;
+    QLineEdit*    m_updateRootEdit   = nullptr;
+    QTextBrowser* m_statusArea       = nullptr;
+    QPushButton*  m_btnSave          = nullptr;
 
     std::optional<RuntimeTargetConfig> m_savedConfig;
 };

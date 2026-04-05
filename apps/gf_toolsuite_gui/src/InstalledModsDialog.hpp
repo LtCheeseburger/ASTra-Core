@@ -32,6 +32,7 @@ private slots:
     void onSelectionChanged();
     void onEnable();
     void onDisable();
+    void onUninstall();
     void onRefresh();
 
 private:
@@ -51,10 +52,11 @@ private:
     QLabel*             m_contextLabel = nullptr;
     QLabel*             m_countLabel   = nullptr;
 
-    QPushButton* m_btnEnable  = nullptr;
-    QPushButton* m_btnDisable = nullptr;
-    QPushButton* m_btnRefresh = nullptr;
-    QPushButton* m_btnClose   = nullptr;
+    QPushButton* m_btnEnable    = nullptr;
+    QPushButton* m_btnDisable   = nullptr;
+    QPushButton* m_btnUninstall = nullptr;
+    QPushButton* m_btnRefresh   = nullptr;
+    QPushButton* m_btnClose     = nullptr;
 };
 
 } // namespace gf::gui

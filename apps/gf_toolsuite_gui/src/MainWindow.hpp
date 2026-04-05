@@ -26,6 +26,7 @@ class QTreeWidgetItem;
 class QLabel;
 class QPlainTextEdit;
 class QDockWidget;
+class QKeyEvent;
 class QLineEdit;
 class QWidget;
 class QProgressBar;
@@ -52,6 +53,10 @@ class VersionBadgeWidget;
 
 namespace gf::gui {
 class ActiveProfileWidget;
+}
+
+namespace gf::gui {
+class AudioBrowserPanel;
 }
 
 namespace gf::gui::apt_editor {
@@ -479,7 +484,12 @@ private:
   QAction* m_actDevMode = nullptr;
   QAction* m_actUndoLastReplace = nullptr;
   QAction* m_actCheckForUpdates = nullptr;
+  QAction* m_actAudioBrowser = nullptr;
   bool m_devMode = false;
+
+  // Audio browser dock (Phase 3B)
+  gf::gui::AudioBrowserPanel* m_audioBrowser = nullptr;
+  QString m_audioTempFilePath;  // path of current temp file for embedded audio; cleaned up on next select
 
   // Version badge: top-right of the main toolbar.
   gf::gui::update::VersionBadgeWidget* m_versionBadge = nullptr;

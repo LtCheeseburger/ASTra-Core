@@ -33,6 +33,10 @@ struct ModProfile {
     QString      name;          // User-visible display name (non-empty)
     QString      description;   // Optional user-supplied note
     QString      workspacePath; // Absolute canonical path to workspace root
+    QString      sourcePath;    // Absolute path to the game content dir this workspace was
+                                // created from.  Empty for pre-Phase-7 profiles (backward compat).
+                                // When non-empty and game_copy/ is populated, edits target
+                                // game_copy/ instead of the original source.
     QString      createdAt;     // UTC ISO 8601
     QString      updatedAt;     // UTC ISO 8601
 

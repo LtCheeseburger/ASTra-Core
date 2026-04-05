@@ -1,4 +1,5 @@
 #include "BaselineCaptureService.hpp"
+#include "ContentRootDiscovery.hpp"
 #include "ModProfileManager.hpp"
 #include "ModWorkspaceManager.hpp"
 
@@ -36,18 +37,18 @@ BaselineCaptureResult BaselineCaptureService::capture(const QString&     gameId,
         return result;
     }
 
-    // ── 1. Discover qkl_*.AST files in the live AST directory ─────────────────
+    // ── 1. Discover *.ast / *.AST files in the base content root ──────────────
     const QDir astDir(astDirPath);
     if (!astDir.exists()) {
-        result.message = QString("AST directory does not exist: %1").arg(astDirPath);
+        result.message = QString("Base content root does not exist: %1").arg(astDirPath);
         return result;
     }
 
-    const QStringList astFiles = astDir.entryList(
-        {"qkl_*.AST", "qkl_*.ast"}, QDir::Files, QDir::Name);
+    // Phase 6A: no qkl_* prefix restriction — capture all *.ast / *.AST
+    const QStringList astFiles = discoverBaseAstFiles(astDir);
 
     if (astFiles.isEmpty()) {
-        result.message = QString("No qkl_*.AST files found in: %1").arg(astDirPath);
+        result.message = QString("No *.ast / *.AST files found in: %1").arg(astDirPath);
         return result;
     }
 
@@ -71,7 +72,6 @@ BaselineCaptureResult BaselineCaptureService::capture(const QString&     gameId,
     if (!QDir().mkpath(destDir)) {
         result.message =
             QString("Cannot create overlay/ast directory: %1").arg(destDir);
-        // Profile was created — return its ID so the caller knows what happened
         result.warnings << "Profile created but overlay/ast/ directory could not be created.";
         return result;
     }
@@ -80,10 +80,10 @@ BaselineCaptureResult BaselineCaptureService::capture(const QString&     gameId,
     QProgressDialog* progress = nullptr;
     if (progressParent) {
         progress = new QProgressDialog(
-            QString("Capturing baseline: %1…").arg(profileName),
+            QString("Capturing baseline: %1\u2026").arg(profileName),
             "Cancel", 0, astFiles.size(), progressParent);
         progress->setWindowModality(Qt::WindowModal);
-        progress->setMinimumDuration(500); // only show if it takes > 500 ms
+        progress->setMinimumDuration(500);
         progress->show();
     }
 
@@ -96,17 +96,14 @@ BaselineCaptureResult BaselineCaptureService::capture(const QString&     gameId,
             if (progress->wasCanceled()) { cancelled = true; break; }
             progress->setValue(i);
             progress->setLabelText(
-                QString("Copying %1 (%2 / %3)…")
+                QString("Copying %1 (%2 / %3)\u2026")
                     .arg(astFiles[i]).arg(i + 1).arg(astFiles.size()));
-            // Let the event loop process the progress update
             qApp->processEvents(QEventLoop::ExcludeUserInputEvents);
         }
 
         const QString srcPath  = astDir.filePath(astFiles[i]);
         const QString dstPath  = QDir(destDir).filePath(astFiles[i]);
 
-        // Never overwrite — this is a fresh workspace, so this shouldn't happen,
-        // but guard just in case.
         if (QFile::exists(dstPath)) {
             result.warnings << QString("Skipped (already exists): %1").arg(astFiles[i]);
             continue;
@@ -139,7 +136,6 @@ BaselineCaptureResult BaselineCaptureService::capture(const QString&     gameId,
     QString markErr;
     if (!mgr.markAsBaseline(newProfile.id, true, type, &markErr)) {
         result.warnings << "Could not mark profile as baseline: " + markErr;
-        // Non-fatal — the profile and files exist, just the flag is missing
     }
 
     // ── 5. Set as active profile ───────────────────────────────────────────────
@@ -160,21 +156,20 @@ BaselineCaptureResult BaselineCaptureService::capture(const QString&     gameId,
 
     gf::core::logInfo(gf::core::LogCategory::General,
                       "BaselineCaptureService: capture complete",
-                      (profileName + " — " + QString::number(copied) + " files").toStdString());
+                      (profileName + " \u2014 " + QString::number(copied) + " files").toStdString());
     return result;
 }
 
-// ── Phase 5A: multi-root capture ──────────────────────────────────────────────
+// ── Phase 5A/6A: multi-root capture ───────────────────────────────────────────
 
-// Helper: copies all qkl_*.AST files from srcDir into destDir.
+// Copies flat *.ast / *.AST files from srcDir into destDir.
 // Returns number copied; appends failure messages to warnings.
-static int copyAstDirectory(const QDir&      srcDir,
-                             const QString&   destDir,
-                             QStringList&     warnings,
-                             QProgressDialog* progress,
-                             int              progressOffset,
-                             int              /*progressTotal*/,
-                             const QString&   label) {
+static int copyBaseAstDirectory(const QDir&      srcDir,
+                                  const QString&   destDir,
+                                  QStringList&     warnings,
+                                  QProgressDialog* progress,
+                                  int              progressOffset,
+                                  const QString&   label) {
     if (!srcDir.exists()) {
         warnings << QString("Source directory does not exist: %1").arg(srcDir.path());
         return 0;
@@ -185,8 +180,8 @@ static int copyAstDirectory(const QDir&      srcDir,
         return 0;
     }
 
-    const QStringList files = srcDir.entryList(
-        {"qkl_*.AST", "qkl_*.ast"}, QDir::Files, QDir::Name);
+    // Phase 6A: no qkl_* prefix — capture all *.ast / *.AST
+    const QStringList files = discoverBaseAstFiles(srcDir);
 
     int copied = 0;
     for (int i = 0; i < files.size(); ++i) {
@@ -194,7 +189,7 @@ static int copyAstDirectory(const QDir&      srcDir,
             if (progress->wasCanceled()) break;
             progress->setValue(progressOffset + i);
             progress->setLabelText(
-                QString("Copying %1 (%2): %3…")
+                QString("Copying %1 (%2): %3\u2026")
                     .arg(label).arg(i + 1).arg(files[i]));
             qApp->processEvents(QEventLoop::ExcludeUserInputEvents);
         }
@@ -202,7 +197,7 @@ static int copyAstDirectory(const QDir&      srcDir,
         const QString src = srcDir.filePath(files[i]);
         const QString dst = QDir(destDir).filePath(files[i]);
 
-        if (QFile::exists(dst)) continue; // fresh workspace, skip silently
+        if (QFile::exists(dst)) continue;
 
         if (!QFile::copy(src, dst)) {
             warnings << QString("Failed to copy \"%1\" from %2").arg(files[i], srcDir.path());
@@ -217,6 +212,52 @@ static int copyAstDirectory(const QDir&      srcDir,
     if (progress && !progress->wasCanceled())
         progress->setValue(progressOffset + files.size());
 
+    return copied;
+}
+
+// Phase 6A: Recursively copies AST/EDAT content from srcDir into destDir,
+// preserving relative path structure.  Used for the update content root.
+static int copyUpdateRootRecursive(const QString&                            destDirBase,
+                                    QStringList&                              warnings,
+                                    QProgressDialog*                          progress,
+                                    int&                                      progressOffset,
+                                    const QVector<QPair<QString,QString>>&    files)
+{
+    int copied = 0;
+    for (const auto& [relPath, absPath] : files) {
+        if (progress && progress->wasCanceled()) break;
+
+        const QString dstPath = QDir(destDirBase).filePath(relPath);
+        // Create parent directory for nested files (e.g. DLC/CFBR_DLC_V19/)
+        if (!QDir().mkpath(QFileInfo(dstPath).absolutePath())) {
+            warnings << QString("Cannot create directory for: %1").arg(relPath);
+            ++progressOffset;
+            continue;
+        }
+
+        if (progress) {
+            progress->setValue(progressOffset);
+            progress->setLabelText(
+                QString("Copying update: %1\u2026")
+                    .arg(QFileInfo(relPath).fileName()));
+            qApp->processEvents(QEventLoop::ExcludeUserInputEvents);
+        }
+
+        if (QFile::exists(dstPath)) {
+            ++progressOffset;
+            continue;
+        }
+
+        if (!QFile::copy(absPath, dstPath)) {
+            warnings << QString("Failed to copy update file: %1").arg(relPath);
+            gf::core::logWarn(gf::core::LogCategory::FileIO,
+                              "BaselineCaptureService: update copy failed",
+                              relPath.toStdString());
+        } else {
+            ++copied;
+        }
+        ++progressOffset;
+    }
     return copied;
 }
 
@@ -244,52 +285,58 @@ BaselineCaptureResult BaselineCaptureService::captureFromRuntime(
         return result;
     }
 
-    // ── Pre-flight: verify base root before creating a profile ────────────────
-    // Fail clearly now so we don't leave an empty orphan profile in the index.
+    // ── Pre-flight: verify base root ──────────────────────────────────────────
     const QDir baseDir(runtime.astDirPath);
     if (!baseDir.exists()) {
         result.message = QString(
-            "Base AST directory does not exist: %1").arg(runtime.astDirPath);
+            "Base content root does not exist: %1").arg(runtime.astDirPath);
         gf::core::logWarn(gf::core::LogCategory::General,
                           "BaselineCaptureService: base root missing",
                           runtime.astDirPath.toStdString());
         return result;
     }
-    const QStringList baseFiles =
-        baseDir.entryList({"qkl_*.AST", "qkl_*.ast"}, QDir::Files);
+    const QStringList baseFiles = discoverBaseAstFiles(baseDir);
     if (baseFiles.isEmpty()) {
         result.message = QString(
-            "No qkl_*.AST files found in base AST directory: %1").arg(runtime.astDirPath);
+            "No *.ast / *.AST files found in base content root: %1").arg(runtime.astDirPath);
         gf::core::logWarn(gf::core::LogCategory::General,
                           "BaselineCaptureService: base root empty",
                           runtime.astDirPath.toStdString());
         return result;
     }
 
-    // Pre-check optional roots and warn now (before progress dialog opens).
+    // Phase 6A: pre-discover update root files recursively before creating profile
+    // (prevents orphan profiles on failure and gives accurate progress counts).
+    struct RootCapture {
+        const RuntimeContentRoot* cr = nullptr;
+        QVector<QPair<QString,QString>> files; // {relPath, absPath}
+    };
+    QVector<RootCapture> rootCaptures;
+
     for (const RuntimeContentRoot& cr : runtime.contentRoots) {
-        const QDir rd(cr.path);
-        const QString label = cr.displayName.isEmpty()
-            ? runtimeContentKindLabel(cr.kind) : cr.displayName;
-        if (!rd.exists()) {
-            // Will also warn during copy — just note it here for the preflight log.
+        RootCapture rc;
+        rc.cr = &cr;
+        if (QDir(cr.path).exists()) {
+            discoverAstFilesRecursive(QDir(cr.path), QString(), rc.files);
+            if (rc.files.isEmpty()) {
+                const QString label = cr.displayName.isEmpty()
+                    ? runtimeContentKindLabel(cr.kind) : cr.displayName;
+                result.warnings << QString(
+                    "Content root \"%1\" is configured but contains no matching files: %2")
+                    .arg(label, cr.path);
+            }
+        } else {
             gf::core::logWarn(gf::core::LogCategory::General,
                               "BaselineCaptureService: optional root does not exist",
                               cr.path.toStdString());
-        } else if (rd.entryList({"qkl_*.AST", "qkl_*.ast"}, QDir::Files).isEmpty()) {
-            result.warnings << QString(
-                "Content root \"%1\" is configured but contains no qkl_*.AST files: %2")
-                .arg(label, cr.path);
         }
+        rootCaptures.append(rc);
     }
 
-    // Count total files across all roots for the progress dialog range.
+    // Total file count for progress dialog
     int totalFiles = static_cast<int>(baseFiles.size());
-    for (const RuntimeContentRoot& cr : runtime.contentRoots) {
-        const QDir rd(cr.path);
-        if (rd.exists())
-            totalFiles += rd.entryList({"qkl_*.AST", "qkl_*.ast"}, QDir::Files).size();
-    }
+    for (const RootCapture& rc : rootCaptures)
+        totalFiles += rc.files.size();
 
     // ── Create profile ────────────────────────────────────────────────────────
     ModProfile newProfile;
@@ -309,7 +356,7 @@ BaselineCaptureResult BaselineCaptureService::captureFromRuntime(
     QProgressDialog* progress = nullptr;
     if (progressParent) {
         progress = new QProgressDialog(
-            QString("Capturing baseline: %1…").arg(profileName),
+            QString("Capturing baseline: %1\u2026").arg(profileName),
             "Cancel", 0, totalFiles, progressParent);
         progress->setWindowModality(Qt::WindowModal);
         progress->setMinimumDuration(500);
@@ -320,44 +367,40 @@ BaselineCaptureResult BaselineCaptureService::captureFromRuntime(
     int offset      = 0;
 
     // ── Copy base game → overlay/ast/ ─────────────────────────────────────────
-    // baseFiles was already computed in the pre-flight check above.
-    totalCopied += copyAstDirectory(
+    totalCopied += copyBaseAstDirectory(
         baseDir,
         layout.overlayAstDir(),
         result.warnings,
         progress, offset,
-        static_cast<int>(baseFiles.size()),
         "Base Game");
     offset += static_cast<int>(baseFiles.size());
 
     // ── Copy each content root → overlay/roots/<idx>/ ─────────────────────────
     QJsonArray manifestRoots;
-    for (int idx = 0; idx < runtime.contentRoots.size(); ++idx) {
-        const RuntimeContentRoot& cr = runtime.contentRoots[idx];
+    for (int idx = 0; idx < rootCaptures.size(); ++idx) {
+        const RootCapture& rc = rootCaptures[idx];
         if (progress && progress->wasCanceled()) break;
+        if (!rc.cr) continue;
 
-        const QDir crDir(cr.path);
-        const int crFileCount = crDir.exists()
-            ? crDir.entryList({"qkl_*.AST", "qkl_*.ast"}, QDir::Files).size()
-            : 0;
+        const QString label = rc.cr->displayName.isEmpty()
+            ? runtimeContentKindLabel(rc.cr->kind)
+            : rc.cr->displayName;
 
-        const QString label = cr.displayName.isEmpty()
-            ? runtimeContentKindLabel(cr.kind)
-            : cr.displayName;
+        const QString destRootDir = layout.overlayRootDir(idx);
+        if (!QDir().mkpath(destRootDir)) {
+            result.warnings << QString("Cannot create overlay/roots/%1/ directory.").arg(idx);
+        } else {
+            totalCopied += copyUpdateRootRecursive(
+                destRootDir,
+                result.warnings, progress, offset,
+                rc.files);
+        }
 
-        totalCopied += copyAstDirectory(
-            crDir,
-            layout.overlayRootDir(idx),
-            result.warnings,
-            progress, offset, crFileCount,
-            label);
-        offset += crFileCount;
-
-        // Build manifest entry for this root.
+        // Build manifest entry
         QJsonObject rm;
         rm["index"]     = idx;
-        rm["kind"]      = runtimeContentKindString(cr.kind);
-        rm["live_path"] = cr.path;
+        rm["kind"]      = runtimeContentKindString(rc.cr->kind);
+        rm["live_path"] = rc.cr->path;
         rm["label"]     = label;
         manifestRoots.append(rm);
     }
@@ -379,7 +422,7 @@ BaselineCaptureResult BaselineCaptureService::captureFromRuntime(
 
             gf::core::SafeWriteOptions opt;
             opt.make_backup = false;
-            opt.max_bytes   = 64ull * 1024ull; // 64 KiB — manifest is tiny
+            opt.max_bytes   = 64ull * 1024ull;
             const auto res = gf::core::safe_write_text(
                 std::filesystem::path(layout.rootsManifestPath().toStdString()),
                 json.toStdString(),

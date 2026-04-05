@@ -11,16 +11,14 @@
 #include "ModProfilesDialog.hpp"
 #include "InstallModDialog.hpp"
 #include "InstalledModsDialog.hpp"
-#include "RuntimeSetupDialog.hpp"
 #include "RuntimeTargetManager.hpp"
 #include "BaselineCaptureService.hpp"
 #include "ExportModDialog.hpp"
 #include "ModMetadataEditorDialog.hpp"
 #include "ModPackageExporter.hpp"
+#include "ApplyPreviewDialog.hpp"
 #include "ProfileApplyService.hpp"
 #include "ProfileResolverService.hpp"
-#include "DriftDetector.hpp"
-#include "LaunchService.hpp"
 #include "gf/models/scan_result.hpp"
 #include "gf/core/log.hpp"
 #include "gf/core/features.hpp"
@@ -290,6 +288,96 @@ public:
         if (opt.decorationPosition != QStyleOptionViewItem::Left)
             return QStyledItemDelegate::sizeHint(opt, idx);
         return QSize(300, 82);
+    }
+};
+
+// ── SidePanelProfileDelegate ──────────────────────────────────────────────────
+// Compact profile row for the in-library side panel.
+// UserRole+1 (bool): isActive
+
+static QString spProfileIconPath(const QString& workspacePath) {
+    return QDir(workspacePath).filePath("profile_icon.png");
+}
+
+class SidePanelProfileDelegate : public QStyledItemDelegate {
+public:
+    using QStyledItemDelegate::QStyledItemDelegate;
+    QSize sizeHint(const QStyleOptionViewItem&, const QModelIndex&) const override {
+        return {200, 50};
+    }
+    void paint(QPainter* painter, const QStyleOptionViewItem& option,
+               const QModelIndex& index) const override {
+        QStyleOptionViewItem opt(option);
+        initStyleOption(&opt, index);
+        opt.icon = QIcon();
+        opt.text.clear();
+        const QWidget* w = opt.widget;
+        QStyle* style = w ? w->style() : QApplication::style();
+        style->drawControl(QStyle::CE_ItemViewItem, &opt, painter, w);
+        painter->save();
+
+        const QRect r = option.rect;
+        constexpr int kIcon   = 32;
+        constexpr int kPad    = 8;
+        constexpr int kGap    = 8;
+
+        const int iconX = r.left() + kPad;
+        const int iconY = r.top() + (r.height() - kIcon) / 2;
+        const QRect iconRect(iconX, iconY, kIcon, kIcon);
+
+        const QIcon icon = index.data(Qt::DecorationRole).value<QIcon>();
+        if (!icon.isNull()) {
+            icon.paint(painter, iconRect, Qt::AlignCenter);
+        } else {
+            painter->setRenderHint(QPainter::Antialiasing);
+            painter->setPen(Qt::NoPen);
+            painter->setBrush(QColor(140, 152, 178));
+            painter->drawRoundedRect(iconRect, 5, 5);
+            const QString name   = index.data(Qt::DisplayRole).toString();
+            const QString letter = name.isEmpty() ? QStringLiteral("?")
+                                                  : QString(name.at(0).toUpper());
+            QFont lf = option.font;
+            lf.setBold(true);
+            lf.setPixelSize(14);
+            painter->setFont(lf);
+            painter->setPen(QColor(255, 255, 255, 210));
+            painter->drawText(iconRect, Qt::AlignCenter, letter);
+        }
+
+        const int textX = iconX + kIcon + kGap;
+        const int textW = r.right() - textX - kPad;
+        const bool isActive = index.data(Qt::UserRole + 1).toBool();
+
+        QFont nf = option.font;
+        if (isActive) nf.setBold(true);
+        painter->setFont(nf);
+        const QPalette::ColorRole role =
+            (option.state & QStyle::State_Selected) ? QPalette::HighlightedText : QPalette::Text;
+        painter->setPen(option.palette.color(role));
+
+        const QFontMetrics fm(nf);
+        const QRect nameRect(textX, r.top() + 5, textW, fm.height() + 2);
+        painter->drawText(nameRect, Qt::AlignLeft | Qt::AlignVCenter,
+                          fm.elidedText(index.data(Qt::DisplayRole).toString(),
+                                        Qt::ElideRight, textW));
+
+        if (isActive) {
+            QFont bf = option.font;
+            bf.setPixelSize(9);
+            painter->setFont(bf);
+            const QFontMetrics bfm(bf);
+            const QString lbl = "Active";
+            const int bw = bfm.horizontalAdvance(lbl) + 8;
+            constexpr int bh = 13;
+            const int bx = textX, by = nameRect.bottom() + 2;
+            painter->setRenderHint(QPainter::Antialiasing);
+            painter->setPen(Qt::NoPen);
+            painter->setBrush(QColor(0x3a, 0xaa, 0x88));
+            painter->drawRoundedRect(bx, by, bw, bh, 3, 3);
+            painter->setPen(Qt::white);
+            painter->drawText(QRect(bx, by, bw, bh), Qt::AlignCenter, lbl);
+        }
+        painter->restore();
     }
 };
 
@@ -714,6 +802,17 @@ void GameSelectorWindow::buildUi() {
   m_actExportDiagnostics->setEnabled(false);
   connect(m_actExportDiagnostics, &QAction::triggered, this, [this]() { exportDiagnosticsBundle(); });
 
+  toolsMenu->addSeparator();
+  m_actCreateBaseline = toolsMenu->addAction("Create Baseline\u2026");
+  m_actCreateBaseline->setEnabled(false);
+  m_actCreateBaseline->setToolTip("Capture the selected game\u2019s current live files into a new baseline profile");
+  connect(m_actCreateBaseline, &QAction::triggered, this, &GameSelectorWindow::onCreateBaseline);
+
+  m_actEditMetadata = toolsMenu->addAction("Edit Package Metadata\u2026");
+  m_actEditMetadata->setEnabled(false);
+  m_actEditMetadata->setToolTip("Edit the metadata of an existing ASTra mod package folder");
+  connect(m_actEditMetadata, &QAction::triggered, this, &GameSelectorWindow::onEditPackageMetadata);
+
   auto* helpMenu = menuBar()->addMenu("Help");
   auto* actBetaGuide = helpMenu->addAction("Beta Testing Guide");
   connect(actBetaGuide, &QAction::triggered, this, &GameSelectorWindow::onBetaTestingGuide);
@@ -973,111 +1072,114 @@ void GameSelectorWindow::buildUi() {
   bottom->addWidget(m_btnRemoveGame);
   bottom->addWidget(m_btnOpenGameFiles);
 
-  // ── Selected-game / mod-profile panel ──────────────────────────────────────
-  m_profilePanel = new QFrame(libraryPane);
-  m_profilePanel->setFrameShape(QFrame::StyledPanel);
-  m_profilePanel->setFrameShadow(QFrame::Plain);
-  m_profilePanel->setStyleSheet(
-      "QFrame { background: palette(window); border: 1px solid palette(mid); border-radius: 4px; }"
+  // ── Side panel (slides in when a game is selected) ────────────────────────
+  m_sidePanel = new QFrame(libraryPane);
+  m_sidePanel->setFrameShape(QFrame::NoFrame);
+  m_sidePanel->setStyleSheet(
+      "QFrame { background: palette(base); border-left: 1px solid palette(mid); }"
       "QLabel { border: none; background: transparent; }");
+  m_sidePanel->setFixedWidth(280);
+  m_sidePanel->setVisible(false);
 
-  auto* panelLayout = new QHBoxLayout(m_profilePanel);
-  panelLayout->setContentsMargins(10, 6, 10, 6);
-  panelLayout->setSpacing(12);
+  auto* spLayout = new QVBoxLayout(m_sidePanel);
+  spLayout->setContentsMargins(12, 12, 12, 12);
+  spLayout->setSpacing(6);
 
-  // Left: game name
-  m_ppGameLabel = new QLabel("No game selected", m_profilePanel);
-  m_ppGameLabel->setStyleSheet("font-weight: bold;");
-  m_ppGameLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
-  m_ppGameLabel->setMinimumWidth(120);
+  m_spGameLabel = new QLabel("", m_sidePanel);
+  m_spGameLabel->setStyleSheet("font-weight: bold; font-size: 14px;");
+  m_spGameLabel->setWordWrap(true);
+  spLayout->addWidget(m_spGameLabel);
 
-  // Centre: active profile status
-  auto* profCaption = new QLabel("Active profile:", m_profilePanel);
-  profCaption->setStyleSheet("color: palette(mid-light);");
-  m_ppProfileLabel = new QLabel("\u2014", m_profilePanel);  // em-dash placeholder
+  m_spMetaLabel = new QLabel("", m_sidePanel);
+  m_spMetaLabel->setStyleSheet("color: palette(mid); font-size: 11px;");
+  spLayout->addWidget(m_spMetaLabel);
 
-  // Deploy status indicator
-  auto* deployCaption = new QLabel("Deploy:", m_profilePanel);
-  deployCaption->setStyleSheet("color: palette(mid-light);");
-  m_ppDeployStatusLabel = new QLabel("\u2014", m_profilePanel);
-  m_ppDeployStatusLabel->setTextFormat(Qt::RichText);
-  m_ppDeployStatusLabel->setMinimumWidth(96);
+  {
+      auto* sep = new QFrame(m_sidePanel);
+      sep->setFrameShape(QFrame::HLine);
+      sep->setFrameShadow(QFrame::Sunken);
+      spLayout->addWidget(sep);
+  }
 
-  // Right: action buttons
-  m_ppManageBtn = new QPushButton("Manage Profiles\u2026", m_profilePanel);
-  m_ppManageBtn->setEnabled(false);
-  m_ppManageBtn->setToolTip("Create, rename, or switch mod profiles for this game");
-  connect(m_ppManageBtn, &QPushButton::clicked, this, &GameSelectorWindow::onManageProfiles);
+  auto* phRow = new QHBoxLayout;
+  auto* phLabel = new QLabel("PROFILES", m_sidePanel);
+  phLabel->setStyleSheet("font-weight: bold; font-size: 10px; color: palette(mid);");
+  m_spProfilesBtn = new QPushButton("Manage\u2026", m_sidePanel);
+  m_spProfilesBtn->setFlat(true);
+  m_spProfilesBtn->setFixedHeight(20);
+  m_spProfilesBtn->setStyleSheet("font-size: 11px;");
+  m_spProfilesBtn->setToolTip("Open full profile manager (create, rename, delete, clone\u2026)");
+  connect(m_spProfilesBtn, &QPushButton::clicked, this, &GameSelectorWindow::onManageProfiles);
+  phRow->addWidget(phLabel, 1);
+  phRow->addWidget(m_spProfilesBtn);
+  spLayout->addLayout(phRow);
 
-  m_ppInstallBtn = new QPushButton("Install Mod\u2026", m_profilePanel);
-  m_ppInstallBtn->setEnabled(false);
-  m_ppInstallBtn->setToolTip("Install a local mod package into the active profile workspace");
-  connect(m_ppInstallBtn, &QPushButton::clicked, this, &GameSelectorWindow::onInstallMod);
+  m_spProfileList = new QListWidget(m_sidePanel);
+  m_spProfileList->setItemDelegate(new SidePanelProfileDelegate(m_spProfileList));
+  m_spProfileList->setIconSize(QSize(32, 32));
+  m_spProfileList->setFixedHeight(160);
+  m_spProfileList->setStyleSheet(
+      "QListWidget { border: 1px solid palette(mid); border-radius: 4px; }"
+      "QListWidget::item:selected { border: 2px solid #6f42c1; border-radius: 4px; }");
+  connect(m_spProfileList, &QListWidget::itemDoubleClicked,
+          this, &GameSelectorWindow::onSidePanelActivateProfile);
+  spLayout->addWidget(m_spProfileList);
 
-  m_ppBrowseBtn = new QPushButton("Installed Mods\u2026", m_profilePanel);
-  m_ppBrowseBtn->setEnabled(false);
-  m_ppBrowseBtn->setToolTip("Browse and manage mods installed in the active profile");
-  connect(m_ppBrowseBtn, &QPushButton::clicked, this, &GameSelectorWindow::onShowInstalledMods);
+  {
+      auto* sep = new QFrame(m_sidePanel);
+      sep->setFrameShape(QFrame::HLine);
+      sep->setFrameShadow(QFrame::Sunken);
+      spLayout->addWidget(sep);
+  }
 
-  m_ppConfigureRuntimeBtn = new QPushButton("Configure Runtime\u2026", m_profilePanel);
-  m_ppConfigureRuntimeBtn->setEnabled(false);
-  m_ppConfigureRuntimeBtn->setToolTip("Set the RPCS3 executable and AST directory for this game");
-  connect(m_ppConfigureRuntimeBtn, &QPushButton::clicked, this, &GameSelectorWindow::onConfigureRuntime);
+  m_spApplyBtn = new QPushButton("Apply Profile", m_sidePanel);
+  m_spApplyBtn->setEnabled(false);
+  m_spApplyBtn->setToolTip("Copy resolved profile files to the live game directory");
+  connect(m_spApplyBtn, &QPushButton::clicked, this, &GameSelectorWindow::onApplyProfile);
+  spLayout->addWidget(m_spApplyBtn);
 
-  m_ppCreateBaselineBtn = new QPushButton("Create Baseline\u2026", m_profilePanel);
-  m_ppCreateBaselineBtn->setEnabled(false);
-  m_ppCreateBaselineBtn->setToolTip("Capture the current live game files into a new baseline profile");
-  connect(m_ppCreateBaselineBtn, &QPushButton::clicked, this, &GameSelectorWindow::onCreateBaseline);
+  auto* modRow = new QHBoxLayout;
+  m_spInstallBtn = new QPushButton("Install Mod\u2026", m_sidePanel);
+  m_spInstallBtn->setEnabled(false);
+  m_spInstallBtn->setToolTip("Install a local mod package into the active profile");
+  connect(m_spInstallBtn, &QPushButton::clicked, this, &GameSelectorWindow::onInstallMod);
+  m_spInstalledBtn = new QPushButton("Installed\u2026", m_sidePanel);
+  m_spInstalledBtn->setEnabled(false);
+  m_spInstalledBtn->setToolTip("Browse mods installed in the active profile");
+  connect(m_spInstalledBtn, &QPushButton::clicked, this, &GameSelectorWindow::onShowInstalledMods);
+  modRow->addWidget(m_spInstallBtn);
+  modRow->addWidget(m_spInstalledBtn);
+  spLayout->addLayout(modRow);
 
-  m_ppExportBtn = new QPushButton("Export Package\u2026", m_profilePanel);
-  m_ppExportBtn->setEnabled(false);
-  m_ppExportBtn->setToolTip("Export the active profile\u2019s resolved output as a portable ASTra mod package");
-  connect(m_ppExportBtn, &QPushButton::clicked, this, &GameSelectorWindow::onExportPackage);
+  m_spExportBtn = new QPushButton("Export Package\u2026", m_sidePanel);
+  m_spExportBtn->setEnabled(false);
+  m_spExportBtn->setToolTip("Export the active profile as a portable ASTra mod package");
+  connect(m_spExportBtn, &QPushButton::clicked, this, &GameSelectorWindow::onExportPackage);
+  spLayout->addWidget(m_spExportBtn);
 
-  m_ppEditMetadataBtn = new QPushButton("Edit Package Metadata\u2026", m_profilePanel);
-  m_ppEditMetadataBtn->setEnabled(false);
-  m_ppEditMetadataBtn->setToolTip("Edit the metadata (name, icon, previews, etc.) of an existing ASTra mod package");
-  connect(m_ppEditMetadataBtn, &QPushButton::clicked,
-          this, &GameSelectorWindow::onEditPackageMetadata);
+  spLayout->addStretch(1);
 
-  m_ppApplyBtn = new QPushButton("Apply Profile", m_profilePanel);
-  m_ppApplyBtn->setEnabled(false);
-  m_ppApplyBtn->setToolTip("Copy the resolved profile files to the live game AST directory");
-  connect(m_ppApplyBtn, &QPushButton::clicked, this, &GameSelectorWindow::onApplyProfile);
+  // ── Body row: game list (left) + side panel (right) ───────────────────────
+  auto* bodyRow = new QHBoxLayout;
+  bodyRow->setContentsMargins(0, 0, 0, 0);
+  bodyRow->setSpacing(0);
 
-  m_ppApplyLaunchBtn = new QPushButton("Apply \u0026 Launch", m_profilePanel);
-  m_ppApplyLaunchBtn->setEnabled(false);
-  m_ppApplyLaunchBtn->setToolTip("Apply the profile, then launch the game in RPCS3");
-  connect(m_ppApplyLaunchBtn, &QPushButton::clicked, this, &GameSelectorWindow::onApplyAndLaunch);
+  auto* listPane = new QWidget(libraryPane);
+  auto* listPaneLayout = new QVBoxLayout(listPane);
+  listPaneLayout->setContentsMargins(0, 0, 0, 0);
+  listPaneLayout->setSpacing(0);
+  listPaneLayout->addWidget(m_list, 1);
+  listPaneLayout->addWidget(m_emptyState, 1);
 
-  m_ppLaunchBtn = new QPushButton("Launch", m_profilePanel);
-  m_ppLaunchBtn->setEnabled(false);
-  m_ppLaunchBtn->setToolTip("Launch the game in RPCS3 (checks deployment state first)");
-  connect(m_ppLaunchBtn, &QPushButton::clicked, this, &GameSelectorWindow::onLaunch);
+  bodyRow->addWidget(listPane, 1);
+  bodyRow->addWidget(m_sidePanel, 0);
 
-  panelLayout->addWidget(m_ppGameLabel, 1);
-  panelLayout->addWidget(profCaption);
-  panelLayout->addWidget(m_ppProfileLabel);
-  panelLayout->addWidget(deployCaption);
-  panelLayout->addWidget(m_ppDeployStatusLabel);
-  panelLayout->addWidget(m_ppManageBtn);
-  panelLayout->addWidget(m_ppInstallBtn);
-  panelLayout->addWidget(m_ppBrowseBtn);
-  panelLayout->addWidget(m_ppConfigureRuntimeBtn);
-  panelLayout->addWidget(m_ppCreateBaselineBtn);
-  panelLayout->addWidget(m_ppExportBtn);
-  panelLayout->addWidget(m_ppEditMetadataBtn);
-  panelLayout->addWidget(m_ppApplyBtn);
-  panelLayout->addWidget(m_ppApplyLaunchBtn);
-  panelLayout->addWidget(m_ppLaunchBtn);
-
-  // Also refresh the panel whenever the active profile changes (e.g., from ModProfilesDialog)
   connect(m_profileManager, &ModProfileManager::activeProfileChanged,
-          this, [this](const QString&, const QString&) { onSelectionChanged(); });
+          this, [this](const QString&, const QString&) { refreshSidePanel(); });
+  connect(m_profileManager, &ModProfileManager::profilesChanged,
+          this, [this](const QString&) { refreshSidePanel(); });
 
-  libraryLayout->addWidget(m_list, 1);
-  libraryLayout->addWidget(m_emptyState, 1);
-  libraryLayout->addWidget(m_profilePanel);
+  libraryLayout->addLayout(bodyRow, 1);
   libraryLayout->addWidget(m_status);
   libraryLayout->addLayout(bottom);
 
@@ -1839,157 +1941,7 @@ void GameSelectorWindow::onSelectionChanged() {
   m_btnOpenGameFiles->setEnabled(hasSel);
   m_btnRemoveGame->setEnabled(hasSel);
 
-  // ── Update profile panel ──────────────────────────────────────────────────
-  if (m_ppManageBtn) {
-      if (!hasSel) {
-          m_ppGameLabel->setText("No game selected");
-          m_ppProfileLabel->setText("\u2014");
-          m_ppManageBtn->setEnabled(false);
-          m_ppInstallBtn->setEnabled(false);
-          m_ppInstallBtn->setToolTip("Select a game to install mods");
-          m_ppBrowseBtn->setEnabled(false);
-          m_ppBrowseBtn->setToolTip("Select a game to browse installed mods");
-          m_ppConfigureRuntimeBtn->setEnabled(false);
-          m_ppConfigureRuntimeBtn->setToolTip("Select a game to configure its runtime");
-          m_ppCreateBaselineBtn->setEnabled(false);
-          m_ppCreateBaselineBtn->setToolTip("Select a game to create a baseline profile");
-          m_ppApplyBtn->setEnabled(false);
-          m_ppApplyBtn->setToolTip("Select a game to apply a profile");
-          m_ppApplyLaunchBtn->setEnabled(false);
-          m_ppApplyLaunchBtn->setToolTip("Select a game to apply and launch");
-          m_ppLaunchBtn->setEnabled(false);
-          m_ppLaunchBtn->setToolTip("Select a game to launch");
-          m_ppExportBtn->setEnabled(false);
-          m_ppExportBtn->setToolTip("Select a game to export a package");
-          m_ppEditMetadataBtn->setEnabled(false);
-          m_ppEditMetadataBtn->setToolTip("Select a game to edit package metadata");
-          m_ppDeployStatusLabel->setText("\u2014");
-      } else {
-          const auto gOpt = m_library->findById(id);
-          std::optional<ModProfile> active;
-          QString pgid;
-          if (gOpt.has_value()) {
-              m_ppGameLabel->setText(cleanGameTitle(gOpt.value()));
-              pgid = gameProfileId(gOpt.value().rootPath);
-              active = m_profileManager->activeProfile(pgid);
-              m_ppProfileLabel->setText(active ? active->name : "None");
-          }
-          m_ppManageBtn->setEnabled(true);
-          m_ppConfigureRuntimeBtn->setEnabled(true);
-
-          // Install Mod and Installed Mods require both an active profile AND runtime config
-          const bool hasActiveProfile  = active.has_value();
-          const bool hasRuntimeConfig  = !pgid.isEmpty() && RuntimeTargetManager::hasConfig(pgid);
-          const QString activeProfileName = hasActiveProfile ? active->name : QString();
-
-          const bool canUseMods = hasActiveProfile && hasRuntimeConfig;
-
-          m_ppInstallBtn->setEnabled(canUseMods);
-          if (!hasActiveProfile)
-              m_ppInstallBtn->setToolTip("Activate a profile before installing mods");
-          else if (!hasRuntimeConfig)
-              m_ppInstallBtn->setToolTip("Configure runtime first (click \u201cConfigure Runtime\u2026\u201d)");
-          else
-              m_ppInstallBtn->setToolTip(
-                  QString("Install a local mod into profile: %1").arg(activeProfileName));
-
-          m_ppBrowseBtn->setEnabled(canUseMods);
-          if (!hasActiveProfile)
-              m_ppBrowseBtn->setToolTip("Activate a profile to browse installed mods");
-          else if (!hasRuntimeConfig)
-              m_ppBrowseBtn->setToolTip("Configure runtime first (click \u201cConfigure Runtime\u2026\u201d)");
-          else
-              m_ppBrowseBtn->setToolTip(
-                  QString("Browse mods installed in profile: %1").arg(activeProfileName));
-
-          m_ppApplyBtn->setEnabled(canUseMods);
-          if (!hasActiveProfile)
-              m_ppApplyBtn->setToolTip("Activate a profile before applying");
-          else if (!hasRuntimeConfig)
-              m_ppApplyBtn->setToolTip("Configure runtime first (click \u201cConfigure Runtime\u2026\u201d)");
-          else
-              m_ppApplyBtn->setToolTip(
-                  QString("Apply profile \u201c%1\u201d to the live game directory").arg(activeProfileName));
-
-          m_ppApplyLaunchBtn->setEnabled(canUseMods);
-          if (!hasActiveProfile)
-              m_ppApplyLaunchBtn->setToolTip("Activate a profile before applying");
-          else if (!hasRuntimeConfig)
-              m_ppApplyLaunchBtn->setToolTip("Configure runtime first (click \u201cConfigure Runtime\u2026\u201d)");
-          else
-              m_ppApplyLaunchBtn->setToolTip(
-                  QString("Apply \u201c%1\u201d and launch the game in RPCS3").arg(activeProfileName));
-
-          m_ppLaunchBtn->setEnabled(canUseMods);
-          if (!hasActiveProfile)
-              m_ppLaunchBtn->setToolTip("Activate a profile before launching");
-          else if (!hasRuntimeConfig)
-              m_ppLaunchBtn->setToolTip("Configure runtime first (click \u201cConfigure Runtime\u2026\u201d)");
-          else
-              m_ppLaunchBtn->setToolTip(
-                  QString("Launch the game in RPCS3 (checks deployment state first)"));
-
-          m_ppExportBtn->setEnabled(canUseMods);
-          if (!hasActiveProfile)
-              m_ppExportBtn->setToolTip("Activate a profile before exporting");
-          else if (!hasRuntimeConfig)
-              m_ppExportBtn->setToolTip("Configure runtime first (click \u201cConfigure Runtime\u2026\u201d)");
-          else
-              m_ppExportBtn->setToolTip(
-                  QString("Export profile \u201c%1\u201d as a portable ASTra package").arg(activeProfileName));
-
-          // Edit Package Metadata — enabled whenever the game has a usable mod setup
-          m_ppEditMetadataBtn->setEnabled(canUseMods);
-          if (!hasActiveProfile)
-              m_ppEditMetadataBtn->setToolTip("Activate a profile before editing package metadata");
-          else if (!hasRuntimeConfig)
-              m_ppEditMetadataBtn->setToolTip("Configure runtime first (click \u201cConfigure Runtime\u2026\u201d)");
-          else
-              m_ppEditMetadataBtn->setToolTip("Edit the metadata of an existing ASTra mod package");
-
-          m_ppConfigureRuntimeBtn->setToolTip(
-              hasRuntimeConfig
-              ? "Update the RPCS3 executable and AST directory for this game"
-              : "Set the RPCS3 executable and AST directory for this game");
-
-          // Create Baseline — enabled whenever runtime is configured (no active profile required).
-          // The capture itself creates a new profile and sets it active.
-          m_ppCreateBaselineBtn->setEnabled(hasRuntimeConfig);
-          m_ppCreateBaselineBtn->setToolTip(
-              hasRuntimeConfig
-              ? "Capture the current live game files into a new baseline profile"
-              : "Configure runtime first (click \u201cConfigure Runtime\u2026\u201d)");
-
-          // ── Deployment status indicator ─────────────────────────────────────
-          if (hasActiveProfile && hasRuntimeConfig) {
-              const auto rtOpt = RuntimeTargetManager::load(pgid);
-              if (rtOpt.has_value()) {
-                  switch (DriftDetector::queryStatus(active->workspacePath, *rtOpt)) {
-                  case DeploymentStatus::Applied:
-                      m_ppDeployStatusLabel->setText(
-                          "<span style='color:#27ae60;'>&#x25CF; Applied</span>");
-                      break;
-                  case DeploymentStatus::Drifted:
-                      m_ppDeployStatusLabel->setText(
-                          "<span style='color:#e67e22;'>&#x25CF; Drifted</span>");
-                      break;
-                  case DeploymentStatus::Partial:
-                      m_ppDeployStatusLabel->setText(
-                          "<span style='color:#f39c12;'>&#x25CF; Partial</span>");
-                      break;
-                  default:
-                      m_ppDeployStatusLabel->setText(
-                          "<span style='color:gray;'>&#x25CF; Not Applied</span>");
-                      break;
-                  }
-              } else {
-                  m_ppDeployStatusLabel->setText("\u2014");
-              }
-          } else {
-              m_ppDeployStatusLabel->setText("\u2014");
-          }
-      }
-  }
+  refreshSidePanel();
 
   if (m_actExportDiagnostics) {
     m_actExportDiagnostics->setEnabled(hasSel);
@@ -2059,6 +2011,99 @@ void GameSelectorWindow::onSelectionChanged() {
   updateCandidatePickers();
 }
 
+void GameSelectorWindow::refreshSidePanel() {
+    const QString id  = selectedGameId();
+    const bool hasSel = !id.isEmpty();
+
+    m_sidePanel->setVisible(hasSel);
+    if (m_actCreateBaseline) m_actCreateBaseline->setEnabled(hasSel);
+    if (m_actEditMetadata)   m_actEditMetadata->setEnabled(hasSel);
+
+    if (!hasSel) return;
+
+    const auto gOpt = m_library->findById(id);
+    if (!gOpt.has_value()) return;
+    const auto& g = gOpt.value();
+
+    m_spGameLabel->setText(cleanGameTitle(g));
+
+    const int astCount = (g.astCount > 0 || g.hasAst)
+        ? g.astCount
+        : (g.mainAstPaths.size() + g.patchAstPaths.size());
+    QString meta = normalizedPlatformLabel(g.platform);
+    if (astCount > 0) meta += QString("  \u00b7  ASTs: %1").arg(astCount);
+    m_spMetaLabel->setText(meta);
+
+    const QString pgid = gameProfileId(g.rootPath);
+    {
+        QString err;
+        m_profileManager->load(&err);
+    }
+    const auto profiles = m_profileManager->profilesForGame(pgid);
+    const auto activeId = m_profileManager->activeProfileId(pgid);
+
+    m_spProfileList->clear();
+    for (const auto& p : profiles) {
+        auto* item = new QListWidgetItem(p.name);
+        const QString iconPath = spProfileIconPath(p.workspacePath);
+        if (QFile::exists(iconPath))
+            item->setIcon(QIcon(iconPath));
+        item->setData(Qt::UserRole,     p.id);
+        item->setData(Qt::UserRole + 1, activeId.has_value() && *activeId == p.id);
+        m_spProfileList->addItem(item);
+    }
+    if (profiles.isEmpty()) {
+        auto* ph = new QListWidgetItem("No profiles \u2014 click Manage\u2026 to create one");
+        ph->setFlags(Qt::NoItemFlags);
+        ph->setForeground(QColor(150, 150, 150));
+        m_spProfileList->addItem(ph);
+    }
+
+    const bool hasActive = activeId.has_value();
+    m_spApplyBtn->setEnabled(hasActive);
+    m_spInstallBtn->setEnabled(hasActive);
+    m_spInstalledBtn->setEnabled(hasActive);
+    m_spExportBtn->setEnabled(hasActive);
+
+    if (hasActive) {
+        const auto ap = m_profileManager->activeProfile(pgid);
+        if (ap) {
+            m_spApplyBtn->setToolTip(
+                QString("Apply profile \u201c%1\u201d to the live game directory").arg(ap->name));
+            m_spInstallBtn->setToolTip(
+                QString("Install a mod into profile: %1").arg(ap->name));
+            m_spInstalledBtn->setToolTip(
+                QString("Browse mods installed in profile: %1").arg(ap->name));
+            m_spExportBtn->setToolTip(
+                QString("Export profile \u201c%1\u201d as an ASTra mod package").arg(ap->name));
+        }
+    } else {
+        const QString tip = "Activate a profile to enable this action";
+        m_spApplyBtn->setToolTip(tip);
+        m_spInstallBtn->setToolTip(tip);
+        m_spInstalledBtn->setToolTip(tip);
+        m_spExportBtn->setToolTip(tip);
+    }
+}
+
+void GameSelectorWindow::onSidePanelActivateProfile(QListWidgetItem* item) {
+    if (!item) return;
+    const QString profileId = item->data(Qt::UserRole).toString();
+    if (profileId.isEmpty()) return;
+
+    const QString gameId = selectedGameId();
+    if (gameId.isEmpty()) return;
+    const auto gOpt = m_library->findById(gameId);
+    if (!gOpt.has_value()) return;
+
+    const QString pgid = gameProfileId(gOpt.value().rootPath);
+    QString err;
+    if (!m_profileManager->setActiveProfile(pgid, profileId, &err)) {
+        QMessageBox::warning(this, "Activate Profile", err);
+        return;
+    }
+    refreshSidePanel();
+}
 
 void GameSelectorWindow::onManageProfiles() {
     const QString gameId = selectedGameId();
@@ -2077,7 +2122,23 @@ void GameSelectorWindow::onManageProfiles() {
         m_profileManager->load(&err);
     }
 
-    auto* dlg = new ModProfilesDialog(m_profileManager, profileGameId, displayName, this);
+    // Phase 7: resolve the source content path so NewProfileDialog can pre-fill
+    // the game copy field.  Prefer the runtime-configured AST dir; fall back to
+    // the game entry's USRDIR / scanRoot (covers games without runtime config).
+    QString sourceContentPath;
+    {
+        const auto rtCfg = RuntimeTargetManager::load(profileGameId);
+        if (rtCfg && !rtCfg->astDirPath.isEmpty()) {
+            sourceContentPath = rtCfg->astDirPath;
+        } else if (!g.usrdirPath.isEmpty()) {
+            sourceContentPath = g.usrdirPath;
+        } else if (!g.scanRoot.isEmpty()) {
+            sourceContentPath = g.scanRoot;
+        }
+    }
+
+    auto* dlg = new ModProfilesDialog(m_profileManager, profileGameId, displayName,
+                                      sourceContentPath, this);
     dlg->setAttribute(Qt::WA_DeleteOnClose);
     dlg->show();
     dlg->raise();
@@ -2145,105 +2206,6 @@ void GameSelectorWindow::onShowInstalledMods() {
     dlg->activateWindow();
 }
 
-void GameSelectorWindow::onConfigureRuntime() {
-    const QString gameId = selectedGameId();
-    if (gameId.isEmpty()) return;
-
-    const auto gOpt = m_library->findById(gameId);
-    if (!gOpt.has_value()) return;
-
-    const QString pgid        = gameProfileId(gOpt.value().rootPath);
-    const QString displayName = cleanGameTitle(gOpt.value());
-
-    // Stack-allocated: avoids the use-after-free that WA_DeleteOnClose would cause
-    // when exec() returns after accept() hides the window on Windows/Qt6.
-    RuntimeSetupDialog dlg(pgid, displayName, this);
-    if (dlg.exec() != QDialog::Accepted) return;
-
-    const auto cfgOpt = dlg.savedConfig();
-    if (!cfgOpt.has_value()) return;
-
-    // Refresh button states now that runtime is configured
-    onSelectionChanged();
-
-    // If the game has no baseline profile yet, offer to create one now.
-    {
-        QString loadErr;
-        m_profileManager->load(&loadErr);
-    }
-    const auto profiles = m_profileManager->profilesForGame(pgid);
-    const bool hasBaseline = std::any_of(profiles.cbegin(), profiles.cend(),
-        [](const ModProfile& p) { return p.isBaseline; });
-    if (hasBaseline) return; // already has a baseline — skip the prompt
-
-    const int ans = QMessageBox::question(
-        this,
-        "Runtime Configured \u2014 Create Baseline?",
-        QString("Runtime configured successfully for \u201c%1\u201d.\n\n"
-                "No baseline profile exists yet. Would you like to create one "
-                "from the current live game files?\n\n"
-                "This copies all qkl_*.AST files into a new profile workspace "
-                "so you can later restore or compare against them.")
-            .arg(displayName),
-        QMessageBox::Yes | QMessageBox::No,
-        QMessageBox::Yes);
-
-    if (ans != QMessageBox::Yes) return;
-
-    // Ask the user for a profile name (default: "Base").
-    bool nameOk = false;
-    const QString profileName = QInputDialog::getText(
-        this,
-        "Baseline Profile Name",
-        "Enter a name for the new baseline profile:",
-        QLineEdit::Normal,
-        QStringLiteral("Base"),
-        &nameOk).trimmed();
-
-    if (!nameOk || profileName.isEmpty()) return;
-
-    // Phase 5A: use captureFromRuntime() so multi-root configs (update/DLC roots)
-    // are captured correctly.  Falls back to single-root capture when contentRoots
-    // is empty — identical behavior to the previous call for legacy configs.
-    // Pass displayName so the workspace folder uses the Phase 5D slug-based path.
-    const BaselineCaptureResult result = BaselineCaptureService::captureFromRuntime(
-        pgid,
-        *cfgOpt,
-        profileName,
-        BaselineType::Vanilla,
-        *m_profileManager,
-        this,
-        displayName);
-
-    if (!result.warnings.isEmpty()) {
-        QMessageBox::warning(
-            this,
-            "Baseline Capture Warnings",
-            result.warnings.join('\n'));
-    }
-
-    if (result.success) {
-        QMessageBox::information(
-            this,
-            "Baseline Captured",
-            QString("Baseline captured successfully.\n%1").arg(result.message));
-    } else {
-        QMessageBox::critical(
-            this,
-            "Baseline Capture Failed",
-            result.message);
-    }
-
-    // Refresh panel to reflect the new active profile
-    onSelectionChanged();
-}
-
-// ── Baseline creation (explicit user action) ──────────────────────────────────
-//
-// Unlike the post-configure prompt (which fires once when there is no baseline
-// yet), this handler is available any time runtime is configured so the user
-// can create additional baselines at will.
-
 void GameSelectorWindow::onCreateBaseline() {
     const QString gameId = selectedGameId();
     if (gameId.isEmpty()) return;
@@ -2251,16 +2213,23 @@ void GameSelectorWindow::onCreateBaseline() {
     const auto gOpt = m_library->findById(gameId);
     if (!gOpt.has_value()) return;
 
-    const QString pgid        = gameProfileId(gOpt.value().rootPath);
-    const QString displayName = cleanGameTitle(gOpt.value());
+    const auto& g              = gOpt.value();
+    const QString pgid         = gameProfileId(g.rootPath);
+    const QString displayName  = cleanGameTitle(g);
 
-    const auto cfgOpt = RuntimeTargetManager::load(pgid);
-    if (!cfgOpt.has_value()) {
+    // Resolve AST directory from the game entry directly — no runtime config needed.
+    QString astDir;
+    if (!g.usrdirPath.isEmpty())    astDir = g.usrdirPath;
+    else if (!g.scanRoot.isEmpty()) astDir = g.scanRoot;
+    else                             astDir = g.rootPath;
+
+    if (astDir.isEmpty() || !QDir(astDir).exists()) {
         QMessageBox::warning(
             this, "Create Baseline",
-            "No runtime configuration found for this game.\n\n"
-            "Click \u201cConfigure Runtime\u2026\u201d to set up the RPCS3 executable "
-            "and AST directory first.");
+            QString("Could not locate the game\u2019s content directory.\n\n"
+                    "Expected path: %1\n\n"
+                    "Verify the game was added correctly.")
+                .arg(QDir::toNativeSeparators(astDir)));
         return;
     }
 
@@ -2270,14 +2239,14 @@ void GameSelectorWindow::onCreateBaseline() {
         "Create Baseline",
         "Enter a name for the new baseline profile:",
         QLineEdit::Normal,
-        QStringLiteral("Base"),
+        QStringLiteral("Vanilla"),
         &nameOk).trimmed();
 
     if (!nameOk || profileName.isEmpty()) return;
 
-    const BaselineCaptureResult result = BaselineCaptureService::captureFromRuntime(
+    const BaselineCaptureResult result = BaselineCaptureService::capture(
         pgid,
-        *cfgOpt,
+        astDir,
         profileName,
         BaselineType::Vanilla,
         *m_profileManager,
@@ -2307,6 +2276,32 @@ void GameSelectorWindow::onCreateBaseline() {
     onSelectionChanged();
 }
 
+// ── Phase 4B/4D helpers ───────────────────────────────────────────────────────
+
+// Build a RuntimeTargetConfig from a GameEntry when no persisted config exists.
+// Uses the same path-resolution order as onCreateBaseline() / onAddGame().
+// contentRoots is left empty → single-root mode (safe for the common case).
+static RuntimeTargetConfig deriveRuntimeConfig(const QString&   pgid,
+                                                const GameEntry& g)
+{
+    RuntimeTargetConfig cfg;
+    cfg.gameId = pgid;
+    if (!g.usrdirPath.isEmpty())    cfg.astDirPath = g.usrdirPath;
+    else if (!g.scanRoot.isEmpty()) cfg.astDirPath = g.scanRoot;
+    else                             cfg.astDirPath = g.rootPath;
+    return cfg;
+}
+
+// Load the persisted config; if absent, derive one from the game entry.
+// Users who set up a runtime config (multi-root / DLC) get their full config.
+// Everyone else gets single-root mode derived from the game entry.
+static RuntimeTargetConfig resolveRuntimeConfig(const QString&   pgid,
+                                                 const GameEntry& g)
+{
+    const auto persisted = RuntimeTargetManager::load(pgid);
+    return persisted.value_or(deriveRuntimeConfig(pgid, g));
+}
+
 // ── Phase 5B: mod package export ─────────────────────────────────────────────
 
 void GameSelectorWindow::onExportPackage() {
@@ -2319,14 +2314,8 @@ void GameSelectorWindow::onExportPackage() {
     const QString pgid        = gameProfileId(gOpt.value().rootPath);
     const QString displayName = cleanGameTitle(gOpt.value());
 
-    // Load runtime config
-    const auto runtimeOpt = RuntimeTargetManager::load(pgid);
-    if (!runtimeOpt.has_value()) {
-        QMessageBox::warning(this, "Export Package",
-            "No runtime configuration found for this game.\n\n"
-            "Click \u201cConfigure Runtime\u2026\u201d to set up the RPCS3 executable and AST directory.");
-        return;
-    }
+    // Load runtime config (derived from game entry if no persisted config)
+    const RuntimeTargetConfig runtime = resolveRuntimeConfig(pgid, gOpt.value());
 
     // Load active profile
     {
@@ -2344,7 +2333,7 @@ void GameSelectorWindow::onExportPackage() {
     // Resolve profile
     QString resolveErr;
     const ProfileResolvedMap resolved =
-        ProfileResolverService::resolve(*active, *runtimeOpt, &resolveErr);
+        ProfileResolverService::resolve(*active, runtime, &resolveErr);
     if (!resolved.isValid()) {
         QMessageBox::critical(this, "Export Package — Resolution Failed",
             QString("Profile resolution failed:\n%1")
@@ -2372,7 +2361,7 @@ void GameSelectorWindow::onExportPackage() {
 
     // Export
     const ModExportResult exportResult =
-        ModPackageExporter::exportPackage(spec, resolved, *runtimeOpt, dir, this);
+        ModPackageExporter::exportPackage(spec, resolved, runtime, dir, this);
 
     if (!exportResult.warnings.isEmpty()) {
         QMessageBox::warning(this, "Export Package — Warnings",
@@ -2416,9 +2405,45 @@ void GameSelectorWindow::onEditPackageMetadata() {
     dlg->exec();
 }
 
-// ── Phase 4B/4D helpers ───────────────────────────────────────────────────────
+// Phase 6C: Resolve the active profile and show an ApplyPreviewDialog.
+// Returns false if preconditions fail (dialog shown) or user cancelled.
+// Returns true if resolution succeeded and user confirmed.
+static bool doApplyPreview(const QString&      gameId,
+                            GameLibrary*        library,
+                            ModProfileManager*  profileManager,
+                            QWidget*            parent)
+{
+    const auto gOpt = library->findById(gameId);
+    if (!gOpt.has_value()) return false;
 
-// Shared apply setup used by onApplyProfile(), onApplyAndLaunch(), onLaunch().
+    const QString pgid = gameProfileId(gOpt.value().rootPath);
+
+    {
+        QString e;
+        profileManager->load(&e);
+    }
+
+    const auto active = profileManager->activeProfile(pgid);
+    if (!active.has_value()) return true; // let doApply handle this case
+
+    const RuntimeTargetConfig runtime = resolveRuntimeConfig(pgid, gOpt.value());
+
+    const ProfileResolvedMap resolved =
+        ProfileResolverService::resolve(*active, runtime);
+
+    if (!resolved.isValid()) {
+        QMessageBox::critical(
+            parent, "Apply Profile \u2014 Conflict",
+            "Profile resolution failed:\n\n" + resolved.errors.join('\n'));
+        return false;
+    }
+
+    ApplyPreviewDialog preview(
+        resolved, runtime, active->name, parent);
+    return preview.exec() == QDialog::Accepted;
+}
+
+// Shared apply setup used by onApplyProfile().
 // Returns false if preconditions are not met (error dialogs already shown).
 static bool doApply(const QString&      gameId,
                     GameLibrary*        library,
@@ -2444,22 +2469,18 @@ static bool doApply(const QString&      gameId,
         return false;
     }
 
-    const auto runtimeOpt = RuntimeTargetManager::load(pgid);
-    if (!runtimeOpt.has_value()) {
-        QMessageBox::warning(
-            parent, "Apply Profile",
-            "No runtime configuration found for this game.\n\n"
-            "Click \u201cConfigure Runtime\u2026\u201d to set up the RPCS3 executable and AST directory.");
-        return false;
-    }
+    const RuntimeTargetConfig runtime = resolveRuntimeConfig(pgid, gOpt.value());
 
-    outResult = ProfileApplyService::apply(*active, *runtimeOpt, /*backup=*/true, parent);
+    outResult = ProfileApplyService::apply(*active, runtime, /*backup=*/true, parent);
     return true;
 }
 
 void GameSelectorWindow::onApplyProfile() {
     const QString gameId = selectedGameId();
     if (gameId.isEmpty()) return;
+
+    // Phase 6C: show apply preview before writing any files
+    if (!doApplyPreview(gameId, m_library, m_profileManager, this)) return;
 
     ProfileApplyResult result;
     if (!doApply(gameId, m_library, m_profileManager, this, result)) return;
@@ -2479,156 +2500,6 @@ void GameSelectorWindow::onApplyProfile() {
                               result.errors.isEmpty() ? result.message : result.errors.join('\n'));
     }
 
-    onSelectionChanged();
-}
-
-// ── Phase 4D: shared launch helper ────────────────────────────────────────────
-
-// Execute a validated launch and show an error dialog on failure.
-// Returns true if RPCS3 was started.
-static bool doLaunch(const RuntimeTargetConfig& runtime,
-                     const QString&             gamePath,
-                     QWidget*                   parent) {
-    const LaunchResult r = LaunchService::launch(runtime, gamePath);
-    if (!r.success) {
-        QMessageBox::critical(parent, "Launch Failed", r.error);
-        return false;
-    }
-    return true;
-}
-
-void GameSelectorWindow::onApplyAndLaunch() {
-    const QString gameId = selectedGameId();
-    if (gameId.isEmpty()) return;
-
-    // ── Apply ────────────────────────────────────────────────────────────────
-    ProfileApplyResult applyResult;
-    if (!doApply(gameId, m_library, m_profileManager, this, applyResult)) return;
-
-    if (!applyResult.warnings.isEmpty()) {
-        QMessageBox::warning(this, "Apply & Launch \u2014 Warnings",
-                             applyResult.warnings.join('\n'));
-    }
-
-    if (!applyResult.success) {
-        QMessageBox::critical(this, "Apply Failed \u2014 Launch Aborted",
-                              applyResult.errors.isEmpty()
-                                  ? applyResult.message
-                                  : applyResult.errors.join('\n'));
-        onSelectionChanged();
-        return;
-    }
-
-    // ── Launch ───────────────────────────────────────────────────────────────
-    const auto gOpt = m_library->findById(gameId);
-    if (!gOpt.has_value()) { onSelectionChanged(); return; }
-
-    const QString pgid = gameProfileId(gOpt.value().rootPath);
-    const auto rtOpt   = RuntimeTargetManager::load(pgid);
-    if (!rtOpt.has_value()) {
-        QMessageBox::warning(this, "Launch", "Runtime config could not be loaded.");
-        onSelectionChanged();
-        return;
-    }
-
-    doLaunch(*rtOpt, gOpt.value().rootPath, this);
-    onSelectionChanged();
-}
-
-void GameSelectorWindow::onLaunch() {
-    const QString gameId = selectedGameId();
-    if (gameId.isEmpty()) return;
-
-    const auto gOpt = m_library->findById(gameId);
-    if (!gOpt.has_value()) return;
-
-    const QString pgid = gameProfileId(gOpt.value().rootPath);
-
-    const auto rtOpt = RuntimeTargetManager::load(pgid);
-    if (!rtOpt.has_value()) {
-        QMessageBox::warning(this, "Launch",
-                             "No runtime configuration found for this game.\n\n"
-                             "Click \u201cConfigure Runtime\u2026\u201d to set up RPCS3.");
-        return;
-    }
-
-    // Reload profiles for freshest state
-    { QString e; m_profileManager->load(&e); }
-    const auto active = m_profileManager->activeProfile(pgid);
-    if (!active.has_value()) {
-        QMessageBox::information(this, "Launch",
-                                 "Please activate a mod profile for this game.\n\n"
-                                 "Use \u201cManage Profiles\u2026\u201d to create or activate a profile.");
-        return;
-    }
-
-    // ── Check deployment state ────────────────────────────────────────────────
-    const DeploymentStatus deployStatus =
-        DriftDetector::queryStatus(active->workspacePath, *rtOpt);
-
-    const bool needsPrompt = (deployStatus != DeploymentStatus::Applied);
-
-    if (needsPrompt) {
-        // Compose a context-aware message for the prompt
-        QString reason;
-        switch (deployStatus) {
-        case DeploymentStatus::None:
-            reason = "The active profile has not been applied to the live game directory yet.";
-            break;
-        case DeploymentStatus::Drifted:
-            reason = "The live game directory has drifted from the last applied state.\n"
-                     "Files may have been modified since the last apply.";
-            break;
-        case DeploymentStatus::Partial:
-            reason = "The last apply was incomplete. The live game directory may be "
-                     "in a partially-applied state.";
-            break;
-        default:
-            reason = "The deployment state is unknown.";
-            break;
-        }
-
-        QMessageBox msg(this);
-        msg.setWindowTitle("Profile Not Applied");
-        msg.setIcon(QMessageBox::Warning);
-        msg.setText(reason + "\n\nApply the active profile before launching?");
-        auto* btnApplyLaunch  = msg.addButton("Apply \u0026 Launch",  QMessageBox::AcceptRole);
-        auto* btnLaunchAnyway = msg.addButton("Launch Anyway", QMessageBox::DestructiveRole);
-        msg.addButton(QMessageBox::Cancel);
-        msg.setDefaultButton(btnApplyLaunch);
-        msg.exec();
-
-        if (msg.clickedButton() == btnApplyLaunch) {
-            // Apply, then fall through to launch
-            ProfileApplyResult applyResult;
-            if (!doApply(gameId, m_library, m_profileManager, this, applyResult)) {
-                onSelectionChanged();
-                return;
-            }
-            if (!applyResult.warnings.isEmpty()) {
-                QMessageBox::warning(this, "Apply \u2014 Warnings",
-                                     applyResult.warnings.join('\n'));
-            }
-            if (!applyResult.success) {
-                QMessageBox::critical(this, "Apply Failed \u2014 Launch Aborted",
-                                      applyResult.errors.isEmpty()
-                                          ? applyResult.message
-                                          : applyResult.errors.join('\n'));
-                onSelectionChanged();
-                return;
-            }
-        } else if (msg.clickedButton() == btnLaunchAnyway) {
-            // User explicitly chose to launch with potentially stale files — proceed.
-            gf::core::logWarn(gf::core::LogCategory::General,
-                              "GameSelectorWindow: user launched with stale/unapplied state",
-                              pgid.toStdString());
-        } else {
-            // Cancelled
-            return;
-        }
-    }
-
-    doLaunch(*rtOpt, gOpt.value().rootPath, this);
     onSelectionChanged();
 }
 
@@ -2702,9 +2573,28 @@ void GameSelectorWindow::onBetaTestingGuide() {
 
 void GameSelectorWindow::onAddGame() {
   AddGameDialog dlg(m_library, this);
-  if (dlg.exec() == QDialog::Accepted) {
-    refresh();
+  if (dlg.exec() != QDialog::Accepted) return;
+
+  // Auto-create a Vanilla baseline for the newly added game (best-effort).
+  const GameEntry newGame = dlg.result();
+  if (!newGame.id.isEmpty()) {
+    QString astDir;
+    if (!newGame.usrdirPath.isEmpty())    astDir = newGame.usrdirPath;
+    else if (!newGame.scanRoot.isEmpty()) astDir = newGame.scanRoot;
+    else                                  astDir = newGame.rootPath;
+
+    if (!astDir.isEmpty() && QDir(astDir).exists()) {
+      const QString pgid        = gameProfileId(newGame.rootPath);
+      const QString displayName = cleanGameTitle(newGame);
+      BaselineCaptureService::capture(pgid, astDir, "Vanilla",
+                                      BaselineType::Vanilla,
+                                      *m_profileManager, this, displayName);
+      // Ignore result — baseline is best-effort; user can create one manually
+      // via Tools > Create Baseline if this fails (e.g. no ASTs found yet).
+    }
   }
+
+  refresh();
 }
 
 void GameSelectorWindow::onRemoveGame() {

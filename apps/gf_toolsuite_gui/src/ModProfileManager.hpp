@@ -76,6 +76,13 @@ public:
                         BaselineType        type,
                         QString*            outErr);
 
+    // Phase 7: update mutable fields of an existing profile (name, description,
+    // sourcePath).  Immutable fields (id, gameId, workspacePath, createdAt) are
+    // ignored even if different in the supplied struct.
+    // Does NOT emit profilesChanged — callers that show the profile name should
+    // re-query if they need the change reflected immediately.
+    bool updateProfile(const ModProfile& updated, QString* outErr);
+
 signals:
     // Fired whenever the profile list for a game changes (create / rename / delete).
     void profilesChanged(const QString& gameId);

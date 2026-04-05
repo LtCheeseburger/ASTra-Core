@@ -1,3 +1,6 @@
+# Audio file parsers (SBKR descriptors, SBbe containers)
+add_subdirectory(gf_audio)
+
 add_subdirectory(gf_core)
 
 add_subdirectory(gf_models)

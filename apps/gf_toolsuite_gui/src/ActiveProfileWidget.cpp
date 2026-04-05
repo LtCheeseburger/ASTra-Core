@@ -51,11 +51,22 @@ void ActiveProfileWidget::refresh() {
 
     const auto profile = m_ctx->activeProfile();
     if (profile) {
-        m_label->setText(QString("Profile: %1").arg(profile->name));
-        m_label->setToolTip(
-            QString("Active: %1\nWorkspace: %2")
-                .arg(profile->name,
-                     QDir::toNativeSeparators(profile->workspacePath)));
+        const QString copyRoot = m_ctx->editContentRoot();
+        if (!copyRoot.isEmpty()) {
+            // Phase 7: game_copy/ is populated — user edits the profile copy.
+            m_label->setText(QString("Editing: %1 (copy)").arg(profile->name));
+            m_label->setToolTip(
+                QString("Editing profile copy: %1\nCopy location: %2")
+                    .arg(profile->name,
+                         QDir::toNativeSeparators(copyRoot)));
+        } else {
+            m_label->setText(QString("Profile: %1").arg(profile->name));
+            m_label->setToolTip(
+                QString("Active: %1\nWorkspace: %2\n"
+                        "(No game copy built \u2014 edits target source files)")
+                    .arg(profile->name,
+                         QDir::toNativeSeparators(profile->workspacePath)));
+        }
     } else {
         m_label->setText("Profile: (none)");
         m_label->setToolTip(

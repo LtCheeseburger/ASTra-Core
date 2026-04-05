@@ -5,6 +5,7 @@
 /out-*/
 /cmake-build-*/
 /out-win/
+/sbk/
 
 # CMake / Ninja generated files
 CMakeCache.txt
